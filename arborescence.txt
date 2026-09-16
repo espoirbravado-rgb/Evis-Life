@@ -1,0 +1,106 @@
+.
+├── AGENTS.md
+├── arborescence.txt
+├── index.html
+├── notes
+├── package.json
+├── package-lock.json
+├── README.md
+├── server
+│   ├── evisBackendPlugin.ts
+│   └── skillDiscovery.ts
+├── skills
+│   ├── filesystem
+│   │   └── SKILL.md
+│   ├── memory
+│   │   └── SKILL.md
+│   ├── terminal
+│   │   └── SKILL.md
+│   └── web-research
+│       └── SKILL.md
+├── src
+│   ├── App.tsx
+│   ├── components
+│   │   ├── common
+│   │   │   └── CommandPalette.tsx
+│   │   ├── composer
+│   │   │   └── Composer.tsx
+│   │   ├── drawer
+│   │   │   ├── ContextDrawer.tsx
+│   │   │   └── FilePreviewModal.tsx
+│   │   ├── layout
+│   │   │   ├── AppHeader.tsx
+│   │   │   ├── AppShell.tsx
+│   │   │   ├── Sidebar.tsx
+│   │   │   └── StatusBar.tsx
+│   │   ├── views
+│   │   │   ├── ExerciseRunnerModal.tsx
+│   │   │   ├── ExercisesView.tsx
+│   │   │   ├── FileExplorerView.tsx
+│   │   │   ├── KnowledgeVaultView.tsx
+│   │   │   ├── ProjectsView.tsx
+│   │   │   ├── ProvidersModelsView.tsx
+│   │   │   ├── SettingsView.tsx
+│   │   │   └── SkillsHubView.tsx
+│   │   └── workspace
+│   │       ├── CodeBlock.tsx
+│   │       ├── ConversationWorkspace.tsx
+│   │       ├── MarkdownRenderer.tsx
+│   │       ├── MessageCard.tsx
+│   │       └── ToolExecutionCard.tsx
+│   ├── index.css
+│   ├── lib
+│   │   └── utils.ts
+│   ├── main.tsx
+│   ├── runtime
+│   │   ├── context
+│   │   │   └── contextManager.ts
+│   │   ├── environment
+│   │   │   └── environmentDetector.ts
+│   │   ├── memory
+│   │   │   └── workingMemory.ts
+│   │   ├── orchestrator
+│   │   │   ├── agentLoop.ts
+│   │   │   ├── capabilityResolver.ts
+│   │   │   └── orchestrator.ts
+│   │   ├── registries
+│   │   │   ├── capabilityRegistry.ts
+│   │   │   ├── providerRegistry.ts
+│   │   │   ├── resourceRegistry.ts
+│   │   │   ├── skillRegistry.ts
+│   │   │   └── toolRegistry.ts
+│   │   ├── security
+│   │   │   └── permissionManager.ts
+│   │   └── types
+│   │       ├── domain.ts
+│   │       ├── environment.ts
+│   │       └── memory.ts
+│   ├── services
+│   │   ├── fileData.ts
+│   │   ├── filesystemService.ts
+│   │   ├── intentRouter.ts
+│   │   ├── llamaCppService.ts
+│   │   ├── mockData.ts
+│   │   ├── ollamaService.ts
+│   │   ├── providerService.ts
+│   │   ├── speechService.ts
+│   │   └── toolRegistry.ts
+│   ├── store
+│   │   └── useAppStore.ts
+│   └── types
+│       └── index.ts
+├── starterContent
+│   ├── DECISIONS.md
+│   ├── directive_1.md
+│   ├── Evis_Web_Research.md
+│   ├── Foundation.md
+│   ├── Obligatory.md
+│   ├── skill_1.md
+│   ├── skill_2.md
+│   ├── skill.md
+│   └── Working_Memory.md
+├── test_disabled_should_not_exist.txt
+├── tsconfig.json
+└── vite.config.ts
+
+29 directories, 75 files

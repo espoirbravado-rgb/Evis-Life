@@ -1,0 +1,130 @@
+
+========================================
+FILE: skills/filesystem/SKILL.md
+========================================
+
+# Filesystem & Workspace Manager Skill
+
+## Identity
+- **ID**: filesystem
+- **Name**: Filesystem & Workspace Manager
+- **Version**: 1.0.0
+- **Author**: Evis Core Team
+
+## Purpose
+Enables Evis to read, write, create, inspect, and organize files in the project workspace and create notes on the Linux desktop.
+
+## Scope
+Local workspace directory and Desktop path (~/Desktop). Protected system directories outside workspace are restricted.
+
+## Capabilities Provided
+- file.read
+- file.write
+- file.create
+- file.modify
+- file.list
+- file.search
+- file.delete
+
+## Required Tools
+- filesystem
+
+## Permissions Required
+- filesystem.read
+- filesystem.write
+
+## Instructions for AI
+When the user asks to create, modify, inspect, or write a note (e.g. on the desktop or in workspace), use the filesystem tool. Specify the correct relative path or desktop:filename target.
+
+========================================
+FILE: skills/memory/SKILL.md
+========================================
+
+# Persistent Memory & Knowledge Skill
+
+## Identity
+- **ID**: memory
+- **Name**: Persistent Memory & Knowledge
+- **Version**: 1.0.0
+- **Author**: Evis Core Team
+
+## Purpose
+Enables Evis to store and recall user preferences, facts, project context, and workspace notes across sessions.
+
+## Scope
+Workspace metadata and local key-value store.
+
+## Capabilities Provided
+- memory.read
+- memory.save
+
+## Required Tools
+- memory
+
+## Permissions Required
+- memory.read
+- memory.write
+
+## Instructions for AI
+Use the memory tool to store important facts, user preferences, or retrieve previously saved notes.
+
+========================================
+FILE: skills/terminal/SKILL.md
+========================================
+
+# Terminal Command Runner Skill
+
+## Identity
+- **ID**: terminal
+- **Name**: Terminal Command Runner
+- **Version**: 1.0.0
+- **Author**: Evis Core Team
+
+## Purpose
+Enables Evis to execute bash commands, run test scripts, build code, and inspect operating system state on Linux.
+
+## Scope
+Workspace directory and allowed Linux utilities. Interactive, destructive, or privileged (sudo) commands without approval are prohibited.
+
+## Capabilities Provided
+- terminal.execute
+
+## Required Tools
+- terminal
+
+## Permissions Required
+- terminal.execute
+
+## Instructions for AI
+Use the terminal tool to execute shell commands when compilation, package management, or script execution is requested. Always explain the purpose of the command before or alongside execution.
+
+========================================
+FILE: skills/web-research/SKILL.md
+========================================
+
+# Web Research & Live Intelligence Skill
+
+## Identity
+- **ID**: web-research
+- **Name**: Web Research & Live Intelligence
+- **Version**: 1.0.0
+- **Author**: Evis Community
+
+## Purpose
+Search the web for up-to-date documentation, articles, and solutions.
+
+## Scope
+Public web search engines and URL fetching.
+
+## Capabilities Provided
+- web.search
+- web.fetch
+
+## Required Tools
+- web_search
+
+## Permissions Required
+- network.outbound
+
+## Instructions for AI
+Query internet search engines when the requested information requires real-time or recent data.

@@ -1,0 +1,247 @@
+/**
+ * Evis llama.cpp Provider Service
+ * Connects directly to local llama-server (default port 8080)
+ * Provides OpenAI-compatible endpoint streaming and model query
+ */
+import { IModel } from '../types';
+
+export interface LlamaCppModelResponse {
+  data: Array<{
+    id: string;
+    object: string;
+    created?: number;
+    owned_by?: string;
+    meta?: {
+      n_ctx?: number;
+      size?: number;
+      ftype?: string;
+      n_params?: number;
+    };
+  }>;
+}
+
+export class LlamaCppService {
+  private static defaultBaseUrl = typeof window !== 'undefined' ? '/llama-cpp' : 'http://127.0.0.1:8080';
+
+  /**
+   * Check if llama-server is online and responsive
+   */
+  static async checkHealth(baseUrl: string = this.defaultBaseUrl): Promise<{ online: boolean; status?: string }> {
+    if (typeof window !== 'undefined') {
+      try {
+        const stRes = await fetch('/api/provider/status');
+        if (stRes.ok) {
+          const stData = await stRes.json();
+          if (!stData?.llamaCpp?.running) {
+            return { online: false };
+          }
+        }
+      } catch {
+        return { online: false };
+      }
+    }
+
+    try {
+      const res = await fetch(`${baseUrl}/health`, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return { online: true, status: data.status || 'ok' };
+      }
+      return { online: false };
+    } catch {
+      return { online: false };
+    }
+  }
+
+  /**
+   * Query discovered local GGUF models on the host disk
+   */
+  static async listAvailableGgufModels(): Promise<IModel[]> {
+    try {
+      const res = await fetch('/api/provider/gguf-models');
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.models || []).map((m: any) => ({
+        id: m.id,
+        name: m.name,
+        provider: 'llama.cpp' as const,
+        status: (m.status === 'ready' ? 'ready' : 'offline') as 'ready' | 'offline',
+        size: m.size,
+        quantization: m.quantization,
+        contextWindow: m.contextWindow || 2048,
+        description: m.description,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Query the llama.cpp host for currently loaded models and local GGUFs
+   */
+  static async listModels(baseUrl: string = this.defaultBaseUrl): Promise<{ online: boolean; models: IModel[]; error?: string }> {
+    // 1. First fetch disk GGUF models so we always have the catalogue
+    const diskGgufModels = await this.listAvailableGgufModels();
+
+    // If in browser, inspect process telemetry before probing port 8080
+    if (typeof window !== 'undefined') {
+      try {
+        const stRes = await fetch('/api/provider/status');
+        if (stRes.ok) {
+          const stData = await stRes.json();
+          if (!stData?.llamaCpp?.running) {
+            return { online: false, models: diskGgufModels };
+          }
+        }
+      } catch {
+        return { online: false, models: diskGgufModels };
+      }
+    }
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/models`, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(4000),
+      });
+
+      if (!res.ok) {
+        // llama-server is offline, but we still return available disk models!
+        return { online: false, models: diskGgufModels };
+      }
+
+      const data: LlamaCppModelResponse = await res.json();
+      const rawList = data.data || [];
+
+      // If server is online, mark the actively loaded model as 'ready'
+      const activeIds = rawList.map((m) => m.id);
+
+      const combinedModels: IModel[] = diskGgufModels.map((m) => ({
+        ...m,
+        status: activeIds.includes(m.id) ? ('ready' as const) : ('offline' as const),
+      }));
+
+      // Add any live model from rawList that wasn't in diskGgufModels
+      for (const item of rawList) {
+        if (!combinedModels.some((m) => m.id === item.id)) {
+          const sizeBytes = item.meta?.size || 0;
+          const sizeFormatted = sizeBytes > 0 ? `${(sizeBytes / (1024 * 1024)).toFixed(0)} MB` : 'Local GGUF';
+          const params = item.meta?.n_params ? `${(item.meta.n_params / 1e9).toFixed(1)}B` : '';
+
+          combinedModels.push({
+            id: item.id,
+            name: item.id,
+            provider: 'llama.cpp',
+            status: 'ready',
+            size: sizeFormatted,
+            quantization: item.meta?.ftype || 'GGUF',
+            contextWindow: item.meta?.n_ctx || 2048,
+            description: `llama.cpp standalone model ${params ? `(${params} params)` : ''}`,
+          });
+        }
+      }
+
+      return { online: true, models: combinedModels };
+    } catch (err) {
+      return { online: false, models: diskGgufModels, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Stream chat completions using standard OpenAI-compatible SSE stream
+   */
+  static async streamChat(
+    model: string,
+    messages: Array<{ role: string; content: string }>,
+    systemPrompt: string,
+    onToken: (token: string) => void,
+    onDone: () => void,
+    onError: (err: string) => void,
+    signal?: AbortSignal,
+    baseUrl: string = this.defaultBaseUrl
+  ): Promise<void> {
+    try {
+      const formattedMessages = [
+        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+        ...messages.map((m) => ({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: m.content,
+        })),
+      ];
+
+      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({
+          model,
+          messages: formattedMessages,
+          stream: true,
+          temperature: 0.7,
+        }),
+        signal,
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        onError(`llama.cpp server error (${res.status}): ${errorText || res.statusText}`);
+        onDone();
+        return;
+      }
+
+      if (!res.body) {
+        onError('ReadableStream not supported on this response');
+        onDone();
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith(':')) continue;
+
+          if (trimmed === 'data: [DONE]') {
+            onDone();
+            return;
+          }
+
+          if (trimmed.startsWith('data: ')) {
+            try {
+              const json = JSON.parse(trimmed.slice(6));
+              const deltaContent = json.choices?.[0]?.delta?.content;
+              if (deltaContent) {
+                onToken(deltaContent);
+              }
+            } catch {
+              // Ignore malformed partial chunks
+            }
+          }
+        }
+      }
+
+      onDone();
+    } catch (err: unknown) {
+      if ((err as Error).name === 'AbortError') {
+        onDone();
+        return;
+      }
+      onError((err as Error).message || 'llama.cpp network error');
+      onDone();
+    }
+  }
+}
