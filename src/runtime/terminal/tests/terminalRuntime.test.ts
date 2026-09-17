@@ -221,3 +221,146 @@ test("TerminalRuntime denies a dangerous command after approval rejection", asyn
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "");
 });
+
+test("TerminalRuntime does not expose blocked environment variables", async () => {
+  const terminal = new TerminalRuntime({
+    environment: {
+      blockedEnvKeys: ["EVIS_TEST_SECRET"],
+    },
+  });
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: [
+      "-e",
+      "console.log(process.env.EVIS_TEST_SECRET ?? 'NOT_EXPOSED')",
+    ],
+    env: {
+      EVIS_TEST_SECRET: "SECRET_SHOULD_NOT_APPEAR",
+    },
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.stdout.trim(), "NOT_EXPOSED");
+  assert.doesNotMatch(result.stdout, /SECRET_SHOULD_NOT_APPEAR/);
+});
+
+test("TerminalRuntime only passes allowed environment variables", async () => {
+  const terminal = new TerminalRuntime({
+    environment: {
+      inheritProcessEnv: false,
+      allowedEnvKeys: ["EVIS_ALLOWED"],
+    },
+  });
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: [
+      "-e",
+      "console.log(JSON.stringify({ allowed: process.env.EVIS_ALLOWED, blocked: process.env.EVIS_BLOCKED }))",
+    ],
+    env: {
+      EVIS_ALLOWED: "allowed-value",
+      EVIS_BLOCKED: "blocked-value",
+    },
+  });
+
+  assert.equal(result.status, "success");
+
+  const output = JSON.parse(result.stdout);
+
+  assert.deepEqual(output, {
+    allowed: "allowed-value",
+  });
+
+  assert.equal("blocked" in output, false);
+});
+
+test("TerminalRuntime allows execution inside an allowed working directory", async () => {
+  const cwd = process.cwd();
+
+  const terminal = new TerminalRuntime({
+    policy: {
+      allowedWorkingDirectories: [cwd],
+    },
+  });
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: ["-e", "console.log('EVIS_ALLOWED_CWD')"],
+    cwd,
+  });
+
+  assert.equal(result.status, "success");
+  assert.match(result.stdout, /EVIS_ALLOWED_CWD/);
+});
+
+test("TerminalRuntime denies execution outside allowed working directories", async () => {
+  const cwd = process.cwd();
+
+  const terminal = new TerminalRuntime({
+    policy: {
+      allowedWorkingDirectories: [cwd],
+    },
+  });
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: ["-e", "console.log('EVIS_SHOULD_NOT_RUN')"],
+    cwd: "/tmp",
+  });
+
+  assert.equal(result.status, "policy_denied");
+  assert.equal(result.exitCode, null);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+});
+
+test("TerminalRuntime includes request metadata in approval requests", async () => {
+  let capturedApprovalRequest: {
+    command: string;
+    args: string[];
+    cwd: string;
+    actorId?: string;
+    sessionId?: string;
+    reason?: string;
+  } | undefined;
+
+  const terminal = new TerminalRuntime({
+    policy: {
+      approvalHandler: async (request) => {
+        capturedApprovalRequest = request;
+
+        return {
+          approved: false,
+          reason: "Rejected by metadata test.",
+        };
+      },
+    },
+  });
+
+  const result = await terminal.execute({
+    command: "echo",
+    args: ["EVIS_APPROVAL_METADATA"],
+    executionMode: "shell",
+    cwd: process.cwd(),
+    authorization: {
+      actorId: "test-actor",
+      sessionId: "test-session",
+      reason: "Testing approval metadata",
+    },
+  });
+
+  assert.equal(result.status, "policy_denied");
+  assert.ok(capturedApprovalRequest);
+  assert.equal(capturedApprovalRequest.command, "echo");
+  assert.deepEqual(capturedApprovalRequest.args, [
+    "EVIS_APPROVAL_METADATA",
+  ]);
+  assert.equal(capturedApprovalRequest.actorId, "test-actor");
+  assert.equal(capturedApprovalRequest.sessionId, "test-session");
+  assert.equal(
+    capturedApprovalRequest.reason,
+    "Shell execution requires user approval.",
+  );
+});
