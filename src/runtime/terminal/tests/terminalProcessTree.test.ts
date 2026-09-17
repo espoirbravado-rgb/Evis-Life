@@ -92,3 +92,129 @@ test(
     }
   },
 );
+
+test(
+  "TerminalRuntime terminates descendants when execution is cancelled",
+  { skip: process.platform === "win32" },
+  async () => {
+    const terminal = new TerminalRuntime();
+    const controller = new AbortController();
+
+    const childProgram = [
+      "process.on('SIGTERM', () => {})",
+      "setInterval(() => {}, 1000)",
+    ].join("; ");
+
+    const parentProgram = [
+      "const { spawn } = require('node:child_process')",
+      `const child = spawn(process.execPath, ['-e', ${JSON.stringify(childProgram)}], { stdio: 'ignore' })`,
+      "child.unref()",
+      "child.once('spawn', () => {",
+      "  console.log(child.pid)",
+      "  setInterval(() => {}, 1000)",
+      "})",
+    ].join("; ");
+
+    let descendantPid: number | undefined;
+
+    const execution = terminal.execute({
+      command: process.execPath,
+      args: ["-e", parentProgram],
+      signal: controller.signal,
+    });
+
+    try {
+      // Let the parent spawn its descendant and print its PID.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      controller.abort();
+
+      const result = await execution;
+      assert.equal(result.status, "cancelled");
+
+      descendantPid = Number(result.stdout.trim());
+      assert.ok(
+        Number.isInteger(descendantPid) && descendantPid > 0,
+        `Expected descendant PID in stdout; received: ${JSON.stringify(result.stdout)}`,
+      );
+
+      assert.equal(
+        await waitUntilStopped(descendantPid),
+        true,
+        `Descendant ${descendantPid} was still running after cancellation`,
+      );
+    } finally {
+      if (
+        descendantPid !== undefined &&
+        (await isProcessRunning(descendantPid))
+      ) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+    }
+  },
+);
+
+test(
+  "TerminalRuntime terminates descendants when output exceeds the limit",
+  { skip: process.platform === "win32" },
+  async () => {
+    const terminal = new TerminalRuntime();
+
+    const childProgram = [
+      "process.on('SIGTERM', () => {})",
+      "setInterval(() => {}, 1000)",
+    ].join("; ");
+
+    const parentProgram = [
+      "const { spawn } = require('node:child_process')",
+      `const child = spawn(process.execPath, ['-e', ${JSON.stringify(childProgram)}], { stdio: 'ignore' })`,
+      "child.unref()",
+      "child.once('spawn', () => {",
+      "  console.log(child.pid)",
+      "  setInterval(() => process.stdout.write('0123456789'), 1)",
+      "})",
+    ].join("; ");
+
+    let descendantPid: number | undefined;
+
+    try {
+      const result = await terminal.execute({
+        command: process.execPath,
+        args: ["-e", parentProgram],
+        timeoutMs: 5_000,
+        maxOutputBytes: 128,
+      });
+
+      assert.equal(result.status, "output_limit");
+      assert.equal(result.truncated, true);
+
+      const pidLine = result.stdout.split(/\r?\n/, 1)[0];
+      descendantPid = Number(pidLine);
+
+      assert.ok(
+        Number.isInteger(descendantPid) && descendantPid > 0,
+        `Expected descendant PID in stdout; received: ${JSON.stringify(result.stdout)}`,
+      );
+
+      assert.equal(
+        await waitUntilStopped(descendantPid),
+        true,
+        `Descendant ${descendantPid} was still running after output limit`,
+      );
+    } finally {
+      if (
+        descendantPid !== undefined &&
+        (await isProcessRunning(descendantPid))
+      ) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+    }
+  },
+);
