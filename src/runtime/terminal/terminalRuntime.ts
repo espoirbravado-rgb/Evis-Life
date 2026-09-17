@@ -2,6 +2,8 @@ import { DefaultTerminalEnvironment } from "./terminalEnvironment";
 import { NodeTerminalExecutor } from "./terminalExecutor";
 import { TerminalSecurityManager } from "./terminalPolicy";
 import type {
+  TerminalApprovalGrant,
+  TerminalApprovalRequest,
   TerminalExecutionResult,
   TerminalRequest,
   TerminalRuntimeOptions,
@@ -21,88 +23,113 @@ export class TerminalRuntime {
   }
 
   async execute(request: TerminalRequest): Promise<TerminalExecutionResult> {
-    const cwd = request.cwd ?? this.defaultCwd;
+    const requestedCwd = request.cwd ?? this.defaultCwd;
+    const startedAt = new Date().toISOString();
 
     let context;
 
     try {
-      context = this.environment.resolve(cwd, request.env);
+      context = this.environment.resolve(requestedCwd, request.env);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Invalid Terminal environment.";
 
-      const status = message.includes("does not exist")
-        ? "working_directory_not_found"
-        : "execution_error";
-
-      const now = new Date().toISOString();
-
-      return {
-        status,
-        exitCode: null,
-        signal: null,
-        stdout: "",
-        stderr: "",
-        command: request.command,
-        args: request.args ?? [],
-        cwd: cwd ?? process.cwd(),
-        startedAt: now,
-        finishedAt: now,
-        durationMs: 0,
-        errorMessage: message,
-      };
+      return this.emptyResult(
+        request,
+        message.includes("does not exist")
+          ? "working_directory_not_found"
+          : "execution_error",
+        message,
+        requestedCwd ?? process.cwd(),
+        startedAt,
+      );
     }
 
-    const policy = await this.security.authorize({
-      ...request,
-      cwd: context.cwd,
-    });
+    let policy;
+
+    try {
+      policy = await this.security.authorize(
+        { ...request, cwd: context.cwd },
+        context.cwd,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Terminal policy evaluation failed.";
+
+      return this.emptyResult(
+        request,
+        "execution_error",
+        message,
+        context.cwd,
+        startedAt,
+      );
+    }
 
     if (policy.decision === "deny") {
-      const now = new Date().toISOString();
-
       return {
-        status: "policy_denied",
-        exitCode: null,
-        signal: null,
-        stdout: "",
-        stderr: "",
-        command: request.command,
-        args: request.args ?? [],
-        cwd: context.cwd,
-        startedAt: now,
-        finishedAt: now,
-        durationMs: 0,
-        errorMessage: policy.reason,
+        ...this.emptyResult(
+          request,
+          "policy_denied",
+          policy.reason ?? "Terminal execution denied by policy.",
+          context.cwd,
+          startedAt,
+        ),
       };
     }
 
     if (policy.decision === "require_approval") {
-      const now = new Date().toISOString();
-
       return {
-        status: "approval_required",
-        exitCode: null,
-        signal: null,
-        stdout: "",
-        stderr: "",
-        command: request.command,
-        args: request.args ?? [],
-        cwd: context.cwd,
-        startedAt: now,
-        finishedAt: now,
-        durationMs: 0,
-        errorMessage:
-          policy.reason ?? "Terminal execution requires user approval.",
+        ...this.emptyResult(
+          request,
+          "approval_required",
+          policy.reason ?? "Terminal execution requires approval.",
+          context.cwd,
+          startedAt,
+        ),
+        approvalRequest: policy.approvalRequest,
       };
     }
 
     return this.executor.execute(
-      {
-        ...request,
-        cwd: context.cwd,
-      },
+      { ...request, cwd: context.cwd },
       context,
     );
+  }
+
+  approve(requestId: string): TerminalApprovalGrant {
+    return this.security.approve(requestId);
+  }
+
+  reject(requestId: string): boolean {
+    return this.security.reject(requestId);
+  }
+
+  getPendingApproval(
+    requestId: string,
+  ): TerminalApprovalRequest | undefined {
+    return this.security.getPendingRequest(requestId);
+  }
+
+  private emptyResult(
+    request: TerminalRequest,
+    status: TerminalExecutionResult["status"],
+    errorMessage: string,
+    cwd: string,
+    timestamp: string,
+  ): TerminalExecutionResult {
+    return {
+      status,
+      exitCode: null,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      command: request.command,
+      args: request.args ?? [],
+      cwd,
+      startedAt: timestamp,
+      finishedAt: new Date().toISOString(),
+      durationMs: 0,
+      errorMessage,
+    };
   }
 }

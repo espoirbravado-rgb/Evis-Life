@@ -48,16 +48,22 @@ export interface TerminalApprovalRequest {
   args: string[];
   cwd: string;
   shell: boolean | string;
-  reason?: string;
+  reason: string;
   actorId?: string;
   sessionId?: string;
   createdAt: string;
+  expiresAt: string;
 }
 
 export interface TerminalApprovalDecision {
   approved: boolean;
-  approvalToken?: string;
   reason?: string;
+}
+
+export interface TerminalApprovalGrant {
+  requestId: string;
+  approvalToken: string;
+  expiresAt: string;
 }
 
 export type TerminalApprovalHandler = (
@@ -91,6 +97,7 @@ export interface TerminalExecutionResult {
   errorCode?: string;
   errorMessage?: string;
   truncated?: boolean;
+  approvalRequest?: TerminalApprovalRequest;
 }
 
 export interface TerminalEnvironmentOptions {
@@ -104,7 +111,7 @@ export interface TerminalPolicyOptions {
   requireApprovalForShell?: boolean;
   requireApprovalForPatterns?: RegExp[];
   allowedWorkingDirectories?: string[];
-  approvalHandler?: TerminalApprovalHandler;
+  approvalTtlMs?: number;
 }
 
 export interface TerminalExecutorOptions {

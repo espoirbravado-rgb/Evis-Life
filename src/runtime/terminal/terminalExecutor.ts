@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import type {
   TerminalExecutionContext,
   TerminalExecutionResult,
@@ -29,7 +30,25 @@ export class NodeTerminalExecutor implements TerminalExecutor {
     const maxOutputBytes =
       request.maxOutputBytes ?? this.options.defaultMaxOutputBytes;
 
-    const startedAt = new Date();
+    if (!command) {
+      return Promise.resolve(
+        this.immediateResult(request, context.cwd, "execution_error", "Command cannot be empty."),
+      );
+    }
+
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+      return Promise.resolve(
+        this.immediateResult(request, context.cwd, "execution_error", "Invalid timeoutMs."),
+      );
+    }
+
+    if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
+      return Promise.resolve(
+        this.immediateResult(request, context.cwd, "execution_error", "Invalid maxOutputBytes."),
+      );
+    }
+
+    const startedAt = new Date().toISOString();
     const startedTime = Date.now();
 
     return new Promise((resolve) => {
@@ -42,26 +61,25 @@ export class NodeTerminalExecutor implements TerminalExecutor {
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
 
+      const stdoutDecoder = new StringDecoder("utf8");
+      const stderrDecoder = new StringDecoder("utf8");
+
+      let child: ChildProcess;
+
       const finish = (
         status: TerminalExecutionResult["status"],
         exitCode: number | null,
         signal: string | null,
-        error?: {
-          code?: string;
-          message?: string;
-        },
+        error?: { code?: string; message?: string },
       ) => {
-        if (settled) {
-          return;
-        }
-
+        if (settled) return;
         settled = true;
 
-        if (timer) {
-          clearTimeout(timer);
-        }
+        if (timer) clearTimeout(timer);
+        request.signal?.removeEventListener("abort", onAbort);
 
-        const finishedAt = new Date();
+        stdout += stdoutDecoder.end();
+        stderr += stderrDecoder.end();
 
         resolve({
           status,
@@ -72,79 +90,98 @@ export class NodeTerminalExecutor implements TerminalExecutor {
           command,
           args,
           cwd: context.cwd,
-          startedAt: startedAt.toISOString(),
-          finishedAt: finishedAt.toISOString(),
+          startedAt,
+          finishedAt: new Date().toISOString(),
           durationMs: Date.now() - startedTime,
+          pid: child?.pid,
           errorCode: error?.code,
           errorMessage: error?.message,
-          pid: child.pid,
           truncated,
         });
       };
 
-      const child = spawn(command, args, {
-        cwd: context.cwd,
-        env: context.env,
-        shell,
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        killSignal: this.options.killSignal,
-      });
+      const terminate = () => {
+        if (!child?.pid || settled) return;
 
-      const terminateForLimit = () => {
-        truncated = true;
-        child.kill(this.options.killSignal);
+        // POSIX: detached child is leader of its own process group.
+        if (process.platform !== "win32") {
+          try {
+            process.kill(-child.pid, this.options.killSignal);
+            return;
+          } catch {
+            // The group may already have exited; fall back to direct child.
+          }
+        }
+
+        try {
+          child.kill(this.options.killSignal);
+        } catch {
+          // close/error events will determine the final result.
+        }
+      };
+
+      const onAbort = () => {
+        if (settled) return;
+        cancelled = true;
+        terminate();
       };
 
       const collectOutput = (
         chunk: Buffer,
         target: "stdout" | "stderr",
       ) => {
-        if (settled) {
-          return;
-        }
+        if (settled) return;
 
         const remaining = maxOutputBytes - outputBytes;
 
         if (remaining <= 0) {
-          terminateForLimit();
+          truncated = true;
+          terminate();
           return;
         }
 
-        const chunkBytes = chunk.byteLength;
-
-        if (chunkBytes > remaining) {
-          const partial = chunk.subarray(0, remaining).toString("utf8");
-
-          if (target === "stdout") {
-            stdout += partial;
-          } else {
-            stderr += partial;
-          }
-
-          outputBytes += Buffer.byteLength(partial);
-          terminateForLimit();
-          return;
-        }
-
-        const text = chunk.toString("utf8");
+        const accepted = chunk.subarray(0, remaining);
+        outputBytes += accepted.byteLength;
 
         if (target === "stdout") {
-          stdout += text;
+          stdout += stdoutDecoder.write(accepted);
         } else {
-          stderr += text;
+          stderr += stderrDecoder.write(accepted);
         }
 
-        outputBytes += chunkBytes;
+        if (chunk.byteLength > remaining) {
+          truncated = true;
+          terminate();
+        }
       };
 
-      child.stdout?.on("data", (chunk: Buffer) => {
-        collectOutput(chunk, "stdout");
-      });
+      try {
+        child = spawn(command, args, {
+          cwd: context.cwd,
+          env: context.env,
+          shell,
+          detached: process.platform !== "win32",
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        });
+      } catch (error) {
+        const err = error as NodeJS.ErrnoException;
+        finish(
+          err.code === "EACCES" ? "permission_denied" : "execution_error",
+          null,
+          null,
+          { code: err.code, message: err.message },
+        );
+        return;
+      }
 
-      child.stderr?.on("data", (chunk: Buffer) => {
-        collectOutput(chunk, "stderr");
-      });
+      child.stdout?.on("data", (chunk: Buffer) =>
+        collectOutput(chunk, "stdout"),
+      );
+
+      child.stderr?.on("data", (chunk: Buffer) =>
+        collectOutput(chunk, "stderr"),
+      );
 
       child.on("error", (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") {
@@ -178,10 +215,6 @@ export class NodeTerminalExecutor implements TerminalExecutor {
       });
 
       child.on("close", (exitCode, signal) => {
-        if (settled) {
-          return;
-        }
-
         if (timedOut) {
           finish("timeout", exitCode, signal);
           return;
@@ -206,34 +239,50 @@ export class NodeTerminalExecutor implements TerminalExecutor {
       });
 
       if (request.stdin !== undefined && child.stdin) {
-        child.stdin.write(request.stdin);
-        child.stdin.end();
+        child.stdin.end(request.stdin);
       } else {
         child.stdin?.end();
       }
 
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
+          if (settled) return;
           timedOut = true;
-          child.kill(this.options.killSignal);
+          terminate();
         }, timeoutMs);
       }
 
       if (request.signal) {
         if (request.signal.aborted) {
-          cancelled = true;
-          child.kill(this.options.killSignal);
+          onAbort();
         } else {
-          request.signal.addEventListener(
-            "abort",
-            () => {
-              cancelled = true;
-              child.kill(this.options.killSignal);
-            },
-            { once: true },
-          );
+          request.signal.addEventListener("abort", onAbort, { once: true });
         }
       }
     });
+  }
+
+  private immediateResult(
+    request: TerminalRequest,
+    cwd: string,
+    status: TerminalExecutionResult["status"],
+    errorMessage: string,
+  ): TerminalExecutionResult {
+    const now = new Date().toISOString();
+
+    return {
+      status,
+      exitCode: null,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      command: request.command,
+      args: request.args ?? [],
+      cwd,
+      startedAt: now,
+      finishedAt: now,
+      durationMs: 0,
+      errorMessage,
+    };
   }
 }
