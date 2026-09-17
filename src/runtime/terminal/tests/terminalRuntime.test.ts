@@ -2,6 +2,33 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TerminalRuntime } from "../terminalRuntime";
 
+const delay = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+async function requestShellApproval(
+  terminal: TerminalRuntime,
+  request: {
+    command: string;
+    args?: string[];
+    cwd?: string;
+    authorization?: {
+      actorId?: string;
+      sessionId?: string;
+      reason?: string;
+    };
+  },
+) {
+  const result = await terminal.execute({
+    ...request,
+    executionMode: "shell",
+  });
+
+  assert.equal(result.status, "approval_required");
+  assert.ok(result.approvalRequest);
+
+  return result.approvalRequest!;
+}
+
 test("TerminalRuntime executes a real command independently", async () => {
   const terminal = new TerminalRuntime();
 
@@ -106,9 +133,7 @@ test("TerminalRuntime cancels a running process", async () => {
     signal: controller.signal,
   });
 
-  setTimeout(() => {
-    controller.abort();
-  }, 100);
+  setTimeout(() => controller.abort(), 100);
 
   const result = await execution;
 
@@ -120,10 +145,7 @@ test("TerminalRuntime stops a process when output exceeds the limit", async () =
 
   const result = await terminal.execute({
     command: process.execPath,
-    args: [
-      "-e",
-      "process.stdout.write('X'.repeat(100000))",
-    ],
+    args: ["-e", "process.stdout.write('X'.repeat(100000))"],
     maxOutputBytes: 1024,
   });
 
@@ -141,21 +163,55 @@ test("TerminalRuntime requires approval for shell execution", async () => {
   });
 
   assert.equal(result.status, "approval_required");
+  assert.equal(result.exitCode, null);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+  assert.ok(result.approvalRequest);
+  assert.equal(result.approvalRequest?.command, "echo EVIS_SHELL_OK");
 });
 
-test("TerminalRuntime executes shell command after approval", async () => {
-  const terminal = new TerminalRuntime({
-    policy: {
-      approvalHandler: async () => ({
-        approved: true,
-        decidedBy: "test",
-      }),
-    },
-  });
+test("TerminalRuntime exposes the pending approval request", async () => {
+  const terminal = new TerminalRuntime();
 
   const result = await terminal.execute({
-    command: "echo EVIS_APPROVED_SHELL_OK",
+    command: "echo EVIS_PENDING_REQUEST",
     executionMode: "shell",
+  });
+
+  assert.equal(result.status, "approval_required");
+  assert.ok(result.approvalRequest);
+
+  const pending = terminal.getPendingApproval(result.approvalRequest!.id);
+
+  assert.ok(pending);
+  assert.equal(pending.id, result.approvalRequest!.id);
+  assert.equal(pending.command, "echo EVIS_PENDING_REQUEST");
+  assert.deepEqual(pending.args, []);
+});
+
+test("TerminalRuntime executes a shell command after explicit approval", async () => {
+  const terminal = new TerminalRuntime();
+
+  const approvalRequest = await requestShellApproval(terminal, {
+    command: "echo EVIS_APPROVED_SHELL_OK",
+  });
+
+  const grant = terminal.approve(approvalRequest.id);
+
+  assert.equal(grant.requestId, approvalRequest.id);
+  assert.ok(grant.approvalToken);
+  assert.ok(grant.expiresAt);
+
+  const result = await terminal.execute({
+    command: approvalRequest.command,
+    args: approvalRequest.args,
+    cwd: approvalRequest.cwd,
+    shell: approvalRequest.shell,
+    authorization: {
+      actorId: approvalRequest.actorId,
+      sessionId: approvalRequest.sessionId,
+      approvalToken: grant.approvalToken,
+    },
   });
 
   assert.equal(result.status, "success");
@@ -163,29 +219,62 @@ test("TerminalRuntime executes shell command after approval", async () => {
   assert.match(result.stdout, /EVIS_APPROVED_SHELL_OK/);
 });
 
-test("TerminalRuntime denies shell execution after approval rejection", async () => {
-  const terminal = new TerminalRuntime({
-    policy: {
-      approvalHandler: async () => ({
-        approved: false,
-        reason: "Rejected by test.",
-      }),
-    },
-  });
+test("TerminalRuntime does not execute a shell command before approval", async () => {
+  const terminal = new TerminalRuntime();
 
   const result = await terminal.execute({
-    command: "echo EVIS_SHOULD_NOT_RUN",
+    command: "echo EVIS_MUST_NOT_RUN_YET",
     executionMode: "shell",
   });
 
-  assert.equal(result.status, "policy_denied");
+  assert.equal(result.status, "approval_required");
   assert.equal(result.exitCode, null);
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "");
-  assert.match(result.errorMessage ?? "", /Rejected by test/);
 });
 
-test("TerminalRuntime requires approval for a dangerous command", async () => {
+test("TerminalRuntime rejects a pending approval request", async () => {
+  const terminal = new TerminalRuntime();
+
+  const approvalRequest = await requestShellApproval(terminal, {
+    command: "echo EVIS_REJECTED",
+  });
+
+  assert.equal(terminal.reject(approvalRequest.id), true);
+  assert.equal(terminal.getPendingApproval(approvalRequest.id), undefined);
+});
+
+test("TerminalRuntime cannot approve a rejected request", async () => {
+  const terminal = new TerminalRuntime();
+
+  const approvalRequest = await requestShellApproval(terminal, {
+    command: "echo EVIS_REJECTED",
+  });
+
+  assert.equal(terminal.reject(approvalRequest.id), true);
+
+  assert.throws(
+    () => terminal.approve(approvalRequest.id),
+    /missing|expired|already resolved/i,
+  );
+});
+
+test("TerminalRuntime cannot approve the same request twice", async () => {
+  const terminal = new TerminalRuntime();
+
+  const approvalRequest = await requestShellApproval(terminal, {
+    command: "echo EVIS_APPROVE_ONCE",
+  });
+
+  terminal.approve(approvalRequest.id);
+
+  assert.throws(
+    () => terminal.approve(approvalRequest.id),
+    /missing|expired|already resolved/i,
+  );
+});
+
+test("TerminalRuntime denies a sensitive command without an approval token", async () => {
   const terminal = new TerminalRuntime();
 
   const result = await terminal.execute({
@@ -198,22 +287,51 @@ test("TerminalRuntime requires approval for a dangerous command", async () => {
   assert.equal(result.exitCode, null);
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "");
+  assert.ok(result.approvalRequest);
 });
 
-test("TerminalRuntime denies a dangerous command after approval rejection", async () => {
-  const terminal = new TerminalRuntime({
-    policy: {
-      approvalHandler: async () => ({
-        approved: false,
-        reason: "Rejected by test.",
-      }),
-    },
-  });
+test("TerminalRuntime executes a dangerous command only after explicit approval", async () => {
+  const terminal = new TerminalRuntime();
 
-  const result = await terminal.execute({
+  const approvalRequest = await terminal.execute({
     command: "rm",
     args: ["-rf", "/tmp/evis-terminal-test"],
     executionMode: "direct",
+  });
+
+  assert.equal(approvalRequest.status, "approval_required");
+  assert.ok(approvalRequest.approvalRequest);
+
+  const approval = approvalRequest.approvalRequest!;
+  const grant = terminal.approve(approval.id);
+
+  const result = await terminal.execute({
+    command: approval.command,
+    args: approval.args,
+    cwd: approval.cwd,
+    shell: approval.shell,
+    authorization: {
+      actorId: approval.actorId,
+      sessionId: approval.sessionId,
+      approvalToken: grant.approvalToken,
+    },
+  });
+
+  // La commande est autorisée par le jeton.
+  // Le résultat dépend ensuite de l'existence de la cible et des permissions OS.
+  assert.notEqual(result.status, "approval_required");
+  assert.notEqual(result.status, "policy_denied");
+});
+
+test("TerminalRuntime denies an unknown approval token", async () => {
+  const terminal = new TerminalRuntime();
+
+  const result = await terminal.execute({
+    command: "echo EVIS_UNKNOWN_TOKEN",
+    executionMode: "shell",
+    authorization: {
+      approvalToken: "not-a-real-token",
+    },
   });
 
   assert.equal(result.status, "policy_denied");
@@ -222,10 +340,122 @@ test("TerminalRuntime denies a dangerous command after approval rejection", asyn
   assert.equal(result.stderr, "");
 });
 
+test("TerminalRuntime denies a token after it has already been consumed", async () => {
+  const terminal = new TerminalRuntime();
+
+  const approval = await requestShellApproval(terminal, {
+    command: "echo EVIS_SINGLE_USE",
+  });
+
+  const grant = terminal.approve(approval.id);
+
+  const first = await terminal.execute({
+    command: approval.command,
+    args: approval.args,
+    cwd: approval.cwd,
+    shell: approval.shell,
+    authorization: {
+      actorId: approval.actorId,
+      sessionId: approval.sessionId,
+      approvalToken: grant.approvalToken,
+    },
+  });
+
+  assert.equal(first.status, "success");
+
+  const second = await terminal.execute({
+    command: approval.command,
+    args: approval.args,
+    cwd: approval.cwd,
+    shell: approval.shell,
+    authorization: {
+      actorId: approval.actorId,
+      sessionId: approval.sessionId,
+      approvalToken: grant.approvalToken,
+    },
+  });
+
+  assert.equal(second.status, "policy_denied");
+});
+
+test("TerminalRuntime denies a token used with a different command", async () => {
+  const terminal = new TerminalRuntime();
+
+  const approval = await requestShellApproval(terminal, {
+    command: "echo EVIS_ORIGINAL_COMMAND",
+  });
+
+  const grant = terminal.approve(approval.id);
+
+  const result = await terminal.execute({
+    command: "echo EVIS_CHANGED_COMMAND",
+    executionMode: "shell",
+    authorization: {
+      actorId: approval.actorId,
+      sessionId: approval.sessionId,
+      approvalToken: grant.approvalToken,
+    },
+  });
+
+  assert.equal(result.status, "policy_denied");
+});
+
+test("TerminalRuntime expires pending approval requests", async () => {
+  const terminal = new TerminalRuntime({
+    policy: {
+      approvalTtlMs: 25,
+    },
+  });
+
+  const approval = await requestShellApproval(terminal, {
+    command: "echo EVIS_EXPIRED_PENDING",
+  });
+
+  await delay(60);
+
+  assert.equal(terminal.getPendingApproval(approval.id), undefined);
+
+  assert.throws(
+    () => terminal.approve(approval.id),
+    /missing|expired|already resolved/i,
+  );
+});
+
+test("TerminalRuntime expires approval tokens", async () => {
+  const terminal = new TerminalRuntime({
+    policy: {
+      approvalTtlMs: 25,
+    },
+  });
+
+  const approval = await requestShellApproval(terminal, {
+    command: "echo EVIS_EXPIRED_TOKEN",
+  });
+
+  const grant = terminal.approve(approval.id);
+
+  await delay(60);
+
+  const result = await terminal.execute({
+    command: approval.command,
+    args: approval.args,
+    cwd: approval.cwd,
+    shell: approval.shell,
+    authorization: {
+      actorId: approval.actorId,
+      sessionId: approval.sessionId,
+      approvalToken: grant.approvalToken,
+    },
+  });
+
+  assert.equal(result.status, "policy_denied");
+});
+
 test("TerminalRuntime does not expose blocked environment variables", async () => {
   const terminal = new TerminalRuntime({
     environment: {
       blockedEnvKeys: ["EVIS_TEST_SECRET"],
+      allowedEnvKeys: ["EVIS_TEST_SECRET"],
     },
   });
 
@@ -276,6 +506,29 @@ test("TerminalRuntime only passes allowed environment variables", async () => {
   assert.equal("blocked" in output, false);
 });
 
+test("TerminalRuntime denies environment variables outside the allowlist", async () => {
+  const terminal = new TerminalRuntime({
+    environment: {
+      inheritProcessEnv: false,
+      allowedEnvKeys: ["EVIS_ALLOWED"],
+    },
+  });
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: [
+      "-e",
+      "console.log(process.env.EVIS_NOT_ALLOWED ?? 'NOT_ALLOWED')",
+    ],
+    env: {
+      EVIS_NOT_ALLOWED: "SHOULD_NOT_PASS",
+    },
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.stdout.trim(), "NOT_ALLOWED");
+});
+
 test("TerminalRuntime allows execution inside an allowed working directory", async () => {
   const cwd = process.cwd();
 
@@ -316,32 +569,11 @@ test("TerminalRuntime denies execution outside allowed working directories", asy
   assert.equal(result.stderr, "");
 });
 
-test("TerminalRuntime includes request metadata in approval requests", async () => {
-  let capturedApprovalRequest: {
-    command: string;
-    args: string[];
-    cwd: string;
-    actorId?: string;
-    sessionId?: string;
-    reason?: string;
-  } | undefined;
-
-  const terminal = new TerminalRuntime({
-    policy: {
-      approvalHandler: async (request) => {
-        capturedApprovalRequest = request;
-
-        return {
-          approved: false,
-          reason: "Rejected by metadata test.",
-        };
-      },
-    },
-  });
+test("TerminalRuntime includes actor and session metadata in approval requests", async () => {
+  const terminal = new TerminalRuntime();
 
   const result = await terminal.execute({
-    command: "echo",
-    args: ["EVIS_APPROVAL_METADATA"],
+    command: "echo EVIS_APPROVAL_METADATA",
     executionMode: "shell",
     cwd: process.cwd(),
     authorization: {
@@ -351,16 +583,82 @@ test("TerminalRuntime includes request metadata in approval requests", async () 
     },
   });
 
-  assert.equal(result.status, "policy_denied");
-  assert.ok(capturedApprovalRequest);
-  assert.equal(capturedApprovalRequest.command, "echo");
-  assert.deepEqual(capturedApprovalRequest.args, [
-    "EVIS_APPROVAL_METADATA",
-  ]);
-  assert.equal(capturedApprovalRequest.actorId, "test-actor");
-  assert.equal(capturedApprovalRequest.sessionId, "test-session");
+  assert.equal(result.status, "approval_required");
+  assert.ok(result.approvalRequest);
+
+  assert.equal(result.approvalRequest?.command, "echo EVIS_APPROVAL_METADATA");
+  assert.deepEqual(result.approvalRequest?.args, []);
+  assert.equal(result.approvalRequest?.actorId, "test-actor");
+  assert.equal(result.approvalRequest?.sessionId, "test-session");
   assert.equal(
-    capturedApprovalRequest.reason,
-    "Shell execution requires user approval.",
+    result.approvalRequest?.reason,
+    "Shell execution requires explicit user approval.",
   );
+  assert.ok(result.approvalRequest?.createdAt);
+  assert.ok(result.approvalRequest?.expiresAt);
+});
+
+test("TerminalRuntime rejects an empty command", async () => {
+  const terminal = new TerminalRuntime();
+
+  const result = await terminal.execute({
+    command: "   ",
+  });
+
+  assert.equal(result.status, "policy_denied");
+  assert.equal(result.exitCode, null);
+});
+
+test("TerminalRuntime rejects a non-existent working directory", async () => {
+  const terminal = new TerminalRuntime();
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: ["-e", "console.log('SHOULD_NOT_RUN')"],
+    cwd: "/tmp/evis-directory-that-does-not-exist",
+  });
+
+  assert.equal(result.status, "working_directory_not_found");
+  assert.equal(result.exitCode, null);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+});
+
+test("TerminalRuntime rejects a file as a working directory", async () => {
+  const terminal = new TerminalRuntime();
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: ["-e", "console.log('SHOULD_NOT_RUN')"],
+    cwd: process.execPath,
+  });
+
+  assert.equal(result.status, "execution_error");
+  assert.equal(result.exitCode, null);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+});
+
+test("TerminalRuntime rejects an invalid timeout", async () => {
+  const terminal = new TerminalRuntime();
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: ["-e", "console.log('SHOULD_NOT_RUN')"],
+    timeoutMs: -1,
+  });
+
+  assert.equal(result.status, "execution_error");
+});
+
+test("TerminalRuntime rejects an invalid output limit", async () => {
+  const terminal = new TerminalRuntime();
+
+  const result = await terminal.execute({
+    command: process.execPath,
+    args: ["-e", "console.log('SHOULD_NOT_RUN')"],
+    maxOutputBytes: 0,
+  });
+
+  assert.equal(result.status, "execution_error");
 });
