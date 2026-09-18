@@ -9,6 +9,7 @@ export interface ApprovalRequest {
   cwd: string;
   sessionId?: SessionId;
   taskId?: TaskId;
+  agentId?: string;
   reason: string;
   createdAt: number;
   expiresAt: number;
@@ -33,7 +34,7 @@ export class ApprovalManager {
   public createRequest(
     command: string,
     reason: string,
-    context: { cwd?: string; sessionId?: SessionId; taskId?: TaskId; ttlMs?: number } = {}
+    context: { cwd?: string; sessionId?: SessionId; taskId?: TaskId; agentId?: string; ttlMs?: number } = {}
   ): ApprovalRequest {
     const ttl = context.ttlMs ?? this.defaultTtlMs;
     const request: ApprovalRequest = {
@@ -42,6 +43,7 @@ export class ApprovalManager {
       cwd: context.cwd ?? process.cwd(),
       sessionId: context.sessionId,
       taskId: context.taskId,
+      agentId: context.agentId,
       reason,
       createdAt: Date.now(),
       expiresAt: Date.now() + ttl,
@@ -75,10 +77,14 @@ export class ApprovalManager {
   }
 
   /**
-   * Consumes an approved request strictly bound to the requested command.
-   * Ensures single-use authorization and prevents command hijacking.
+   * Consumes an approved request strictly bound to the requested command and context.
+   * Ensures single-use authorization and prevents command or context hijacking.
    */
-  public consumeApproval(requestId: string, commandToExecute: string): boolean {
+  public consumeApproval(
+    requestId: string,
+    commandToExecute: string,
+    context?: { cwd?: string; sessionId?: SessionId; taskId?: TaskId; agentId?: string }
+  ): boolean {
     const req = this.requests.get(requestId);
     if (!req) return false;
 
@@ -93,6 +99,17 @@ export class ApprovalManager {
 
     // Strict scope bound check: must match the exact authorized command
     if (req.command.trim() !== commandToExecute.trim()) {
+      return false;
+    }
+
+    // Context bounds check: prevent reusing approval in another session/task/agent
+    if (context?.sessionId && req.sessionId && req.sessionId !== context.sessionId) {
+      return false;
+    }
+    if (context?.taskId && req.taskId && req.taskId !== context.taskId) {
+      return false;
+    }
+    if (context?.agentId && req.agentId && req.agentId !== context.agentId) {
       return false;
     }
 
@@ -123,7 +140,7 @@ export class ApprovalManager {
   public async requestApproval(
     command: string,
     reason: string,
-    context: { cwd?: string; sessionId?: SessionId; taskId?: TaskId; ttlMs?: number } = {}
+    context: { cwd?: string; sessionId?: SessionId; taskId?: TaskId; agentId?: string; ttlMs?: number } = {}
   ): Promise<boolean> {
     const request = this.createRequest(command, reason, context);
 
@@ -136,7 +153,7 @@ export class ApprovalManager {
       const approved = await this.handler(request);
       if (approved) {
         request.status = 'approved';
-        return this.consumeApproval(request.requestId, command);
+        return this.consumeApproval(request.requestId, command, context);
       } else {
         request.status = 'rejected';
         return false;

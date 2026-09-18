@@ -149,5 +149,33 @@ describe('Terminal-New Phase 10 (Observability & Metrics)', () => {
 
       await runtime.cleanup();
     });
+
+    it('redacts secrets before persisting to audit records', async () => {
+      const runtime = new TerminalRuntime();
+      const rawSecret = 'ghp_secretTokenForAuditRedaction999';
+      await runtime.execute(`echo "Using token ${rawSecret}"`);
+
+      const records = runtime.audit.getRecords();
+      const latest = records[records.length - 1];
+
+      assert.ok(!latest.command.includes(rawSecret), 'Audit log must not contain raw secret in command');
+      assert.ok(latest.command.includes('[REDACTED_SECRET]'));
+    });
+
+    it('maintains consistent active process counts without drift', async () => {
+      const runtime = new TerminalRuntime();
+      assert.equal(runtime.metrics.getMetrics().activeProcesses, 0);
+
+      // Start background command
+      const job = await runtime.startBackground('sleep 5');
+      assert.ok(runtime.metrics.getMetrics().activeProcesses >= 1);
+
+      job.kill('SIGKILL');
+      await job.wait();
+
+      // Allow close event tick to update count
+      await new Promise(r => setTimeout(r, 20));
+      assert.equal(runtime.metrics.getMetrics().activeProcesses, 0);
+    });
   });
 });

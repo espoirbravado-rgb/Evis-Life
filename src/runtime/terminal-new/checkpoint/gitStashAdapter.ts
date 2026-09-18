@@ -145,6 +145,37 @@ export class GitStashAdapter {
   }
 
   /**
+   * Restores a commit reference when the checkpoint was captured on a clean tree.
+   * Performs reset --hard and clean -fd to deterministically return to that commit state.
+   */
+  public static restoreCommit(cwd: string, commitSha: string): GitApplyResult {
+    if (!this.isGitRepo(cwd)) {
+      return { success: false, conflict: false, error: 'Directory is not inside a Git repository.' };
+    }
+
+    try {
+      execFileSync('git', ['reset', '--hard', commitSha], {
+        cwd,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      execFileSync('git', ['clean', '-fd'], {
+        cwd,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return { success: true, conflict: false };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        conflict: false,
+        error: `Failed to restore commit: ${msg}`,
+      };
+    }
+  }
+
+  /**
    * Drops a specific stash reference once it has been consumed or discarded.
    */
   public static dropStash(cwd: string, stashRefOrSha: string): boolean {

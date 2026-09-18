@@ -73,6 +73,22 @@ describe('Terminal-New Phase 1 (Correctness)', () => {
       assert.equal(result.exitCode, 0);
       assert.match(result.stdout, /privileged command/);
     });
+
+    it('enforces PermissionRules custom deny rule in TerminalRuntime', async () => {
+      const runtime = new TerminalRuntime();
+      runtime.permissionRules.addRule({
+        name: 'block-specific-tool',
+        priority: 999,
+        action: 'deny',
+        commandPrefix: 'special_secret_bin',
+        reason: 'Execution of special_secret_bin is prohibited'
+      });
+
+      const result = await runtime.execute('special_secret_bin --version');
+      assert.equal(result.status, 'denied');
+      assert.equal(result.exitCode, 1);
+      assert.match(result.stderr, /prohibited/);
+    });
   });
 
   describe('Hermetic Environment & Secret Protection', () => {
@@ -165,13 +181,31 @@ describe('Terminal-New Phase 1 (Correctness)', () => {
     });
   });
 
-  describe('Timeout Handling', () => {
+  describe('Timeout and Cancellation Handling', () => {
     it('accurately terminates on timeout and reports status timeout', async () => {
       const runtime = new TerminalRuntime();
       const result = await runtime.execute('sleep 10', { timeoutMs: 150 });
       assert.equal(result.status, 'timeout');
       assert.equal(result.timedOut, true);
       assert.ok(result.durationMs >= 140);
+    });
+
+    it('cancels running command via AbortSignal and reports status cancelled', async () => {
+      const runtime = new TerminalRuntime();
+      const controller = new AbortController();
+
+      // Trigger abort shortly after start
+      setTimeout(() => controller.abort(), 60);
+
+      const result = await runtime.execute('sleep 10', {
+        signal: controller.signal,
+        agentId: 'agent-audit-001'
+      });
+
+      assert.equal(result.status, 'cancelled');
+      assert.equal(result.cancelled, true);
+      assert.equal(result.agentId, 'agent-audit-001');
+      assert.ok(result.durationMs < 2000);
     });
   });
 

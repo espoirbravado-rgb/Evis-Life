@@ -25,19 +25,29 @@ export class PtyExecutor {
     let currentCols = options.cols ?? 80;
     let currentRows = options.rows ?? 24;
 
-    const child = spawn('python3', [
+    const bridgeArgs = [
       BRIDGE_SCRIPT,
       '--cols', String(currentCols),
       '--rows', String(currentRows),
       '--cwd', options.cwd ?? process.cwd(),
       '--cmd', fullCommand
-    ], {
+    ];
+    if (options.shell) {
+      bridgeArgs.push('--shell', options.shell);
+    }
+
+    const safeEnv = {
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+      HOME: process.env.HOME ?? '/home',
+      USER: process.env.USER ?? 'user',
+      SHELL: options.shell ?? '/bin/bash',
+      ...(options.env ?? {}),
+      TERM: 'xterm-256color'
+    };
+
+    const child = spawn('python3', bridgeArgs, {
       cwd: options.cwd ?? process.cwd(),
-      env: {
-        ...process.env,
-        ...(options.env ?? {}),
-        TERM: 'xterm-256color'
-      },
+      env: safeEnv,
       stdio: ['pipe', 'pipe', 'pipe', 'pipe'] // fd 3 is control channel
     });
 

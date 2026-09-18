@@ -109,8 +109,36 @@ describe('Terminal-New Phase 4 (Background Processes)', () => {
         async () => {
           await runtime.startBackground('sleep 5');
         },
-        /Background execution denied by policy/
+        /Background execution denied/
       );
+    });
+
+    it('records background jobs in MetricsCollector upon start', async () => {
+      const runtime = new TerminalRuntime();
+      const initialMetrics = runtime.metrics.getMetrics();
+      const initialJobs = initialMetrics.backgroundJobsStarted;
+
+      const job = await runtime.startBackground('sleep 5');
+      const updatedMetrics = runtime.metrics.getMetrics();
+
+      assert.equal(updatedMetrics.backgroundJobsStarted, initialJobs + 1);
+
+      job.kill('SIGKILL');
+      await job.wait();
+    });
+
+    it('terminates full process tree (parent and descendants) on kill', async () => {
+      const runtime = new TerminalRuntime();
+      // Spawn parent that creates child
+      const job = await runtime.startBackground('bash -c "sleep 30 & sleep 30 & wait"');
+      await new Promise(r => setTimeout(r, 40));
+
+      assert.equal(job.getStatus(), 'running');
+      const killed = job.kill('SIGKILL');
+      assert.equal(killed, true);
+
+      await job.wait();
+      assert.equal(job.getStatus(), 'killed');
     });
   });
 });

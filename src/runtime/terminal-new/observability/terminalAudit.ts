@@ -7,6 +7,7 @@
  */
 
 import type { SessionId, TaskId, CommandStatus } from '../terminalTypes.ts';
+import { SecretRedactor } from '../security/secretRedactor.ts';
 
 export interface AuditRecord {
   eventId: string;
@@ -76,10 +77,12 @@ export class TerminalAudit {
     maybeCwd?: string
   ): AuditRecord {
     const cwd = entry.cwd ?? maybeCwd ?? process.cwd();
+    const redactedCommand = SecretRedactor.redact(entry.command);
     const record: AuditRecord = {
       eventId: `aud_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       timestamp: Date.now(),
       ...entry,
+      command: redactedCommand,
       cwd,
     };
 

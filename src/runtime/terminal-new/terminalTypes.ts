@@ -11,7 +11,8 @@ export type ProcessState =
   | 'exited'
   | 'failed'
   | 'killed'
-  | 'timeout';
+  | 'timeout'
+  | 'cancelled';
 
 export type CommandStatus =
   | 'pending'
@@ -20,6 +21,7 @@ export type CommandStatus =
   | 'failed'
   | 'killed'
   | 'timeout'
+  | 'cancelled'
   | 'denied'
   | 'approval_required';
 
@@ -36,6 +38,7 @@ export interface PolicyDecision {
 export interface CommandExecutionOptions {
   sessionId?: SessionId;
   taskId?: TaskId;
+  agentId?: string;
   actorId?: ActorId;
   cwd?: string;
   env?: Record<string, string>;
@@ -45,6 +48,7 @@ export interface CommandExecutionOptions {
   background?: boolean;
   requireApproval?: boolean;
   allowElevated?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface CommandOutputChunk {
@@ -62,10 +66,12 @@ export interface CommandResult {
   durationMs: number;
   status: CommandStatus;
   timedOut: boolean;
+  cancelled?: boolean;
   truncated: boolean;
   sessionId?: SessionId;
   processId?: ProcessId;
   taskId?: TaskId;
+  agentId?: string;
   error?: Error;
 }
 

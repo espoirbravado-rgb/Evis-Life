@@ -1,6 +1,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { ProcessManager } from './process/processManager.ts';
 import { SessionManager } from './session/sessionManager.ts';
+import type { TerminalSession } from './session/terminalSession.ts';
 import { TerminalEnvironment } from './terminalEnvironment.ts';
 import { TerminalPolicy } from './terminalPolicy.ts';
 import { PermissionRules } from './security/permissionRules.ts';
@@ -87,55 +88,30 @@ export class TerminalRuntime {
     const startTime = Date.now();
     const session = this.sessionManager.getOrCreateSession(options.sessionId, options.cwd);
     const cwd = options.cwd ?? session.cwd;
-    const context = { sessionId: session.id, taskId: options.taskId };
+    const context = { sessionId: session.id, taskId: options.taskId, agentId: options.agentId };
     if (!this.sandboxManager.isInitialized()) {
       await this.sandboxManager.initialize();
     }
 
-    // 1. Central Policy & Permission Evaluation
-    const decision = this.policy.evaluate(command, options);
-
-    if (decision.action === 'deny') {
+    // 1. Central Policy & Permission Evaluation (two-layer: TerminalPolicy → PermissionRules)
+    const authResult = await this.authorizeExecution(command, cwd, session.id, options, context);
+    if (authResult.action !== 'allow') {
       const result: CommandResult = {
         command,
-        exitCode: 1,
+        exitCode: authResult.action === 'deny' ? 1 : 126,
         stdout: '',
-        stderr: decision.reason ?? 'Command execution denied by policy.',
+        stderr: authResult.reason ?? 'Command execution denied.',
         durationMs: 0,
-        status: 'denied',
+        status: authResult.action === 'deny' ? 'denied' : 'approval_required',
         timedOut: false,
         truncated: false,
         sessionId: session.id,
-        taskId: options.taskId
+        taskId: options.taskId,
+        agentId: options.agentId
       };
       this.audit.logExecution(result, cwd);
       this.metrics.recordCommand(0, false);
       return result;
-    }
-
-    if (decision.action === 'require_approval') {
-      this.events.emitApprovalRequired(command, decision.reason ?? 'Approval required', context);
-      const approved = await this.approvalManager.requestApproval(
-        command,
-        decision.reason ?? 'Command requires approval'
-      );
-      if (!approved) {
-        const result: CommandResult = {
-          command,
-          exitCode: 126,
-          stdout: '',
-          stderr: `Execution blocked: ${decision.reason ?? 'Approval required but not granted.'}`,
-          durationMs: 0,
-          status: 'approval_required',
-          timedOut: false,
-          truncated: false,
-          sessionId: session.id,
-          taskId: options.taskId
-        };
-        this.audit.logExecution(result, cwd);
-        this.metrics.recordCommand(0, false);
-        return result;
-      }
     }
 
     // 2. Built-in Session State Commands (cd & export)
@@ -210,7 +186,7 @@ export class TerminalRuntime {
     }
 
     // 3. Wrap command with sandbox isolation if driver is active
-    const effectiveCommand = decision.modifiedCommand ?? command;
+    const effectiveCommand = authResult.modifiedCommand ?? command;
     const wrapResult = this.sandboxManager.wrapCommand(effectiveCommand, cwd);
     const wrappedCommand = wrapResult.command;
 
@@ -226,8 +202,8 @@ export class TerminalRuntime {
     const env = wrapResult.isolated ? wrapResult.env : { ...baseBuilt, ...wrapResult.env };
 
     // 5. Timeouts & output bounding
-    const timeoutMs = decision.effectiveTimeoutMs ?? this.policy.getEffectiveTimeout(options.timeoutMs);
-    const maxOutputBytes = decision.maxOutputBytes ?? this.policy.getEffectiveMaxOutput(options.maxOutputBytes);
+    const timeoutMs = authResult.effectiveTimeoutMs ?? this.policy.getEffectiveTimeout(options.timeoutMs);
+    const maxOutputBytes = authResult.maxOutputBytes ?? this.policy.getEffectiveMaxOutput(options.maxOutputBytes);
 
     const stdoutBuffer = new OutputBuffer(maxOutputBytes);
     const stderrBuffer = new OutputBuffer(maxOutputBytes);
@@ -249,6 +225,15 @@ export class TerminalRuntime {
 
       // Attach process to session
       session.attachProcess(handle.id);
+
+      // Wire AbortSignal: when caller cancels, propagate to the OS process
+      let abortHandler: (() => void) | null = null;
+      if (options.signal) {
+        abortHandler = () => { handle.markCancelled(); };
+        options.signal.addEventListener('abort', abortHandler, { once: true });
+      }
+
+      this.metrics.setActiveProcesses(this.processManager.getActiveProcessCount());
 
       if (handle.pid) {
         this.events.emitProcessStarted(handle.pid, context);
@@ -294,6 +279,10 @@ export class TerminalRuntime {
 
       handle.child.once('close', (code, signal) => {
         if (timer) clearTimeout(timer);
+        // Remove abort listener to avoid memory leak
+        if (abortHandler && options.signal) {
+          options.signal.removeEventListener('abort', abortHandler);
+        }
 
         // Detach process from session
         session.detachProcess(handle.id);
@@ -305,12 +294,19 @@ export class TerminalRuntime {
         const cleanStdout = SecretRedactor.redact(OutputParser.clean(rawStdout));
         const cleanStderr = SecretRedactor.redact(OutputParser.clean(rawStderr));
 
-        let finalStatus = handle.state as CommandResult['status'];
+        // Map process handle state to CommandResult status
+        let finalStatus: CommandResult['status'];
         if (handle.state === 'exited') {
           finalStatus = 'completed';
+        } else if (handle.state === 'cancelled') {
+          finalStatus = 'cancelled';
         } else if (handle.state === 'failed') {
           finalStatus = 'failed';
+        } else {
+          finalStatus = handle.state as CommandResult['status'];
         }
+
+        const isCancelled = handle.state === 'cancelled';
 
         const result: CommandResult = {
           command,
@@ -321,10 +317,12 @@ export class TerminalRuntime {
           durationMs,
           status: finalStatus,
           timedOut: handle.state === 'timeout',
+          cancelled: isCancelled,
           truncated: stdoutBuffer.truncated || stderrBuffer.truncated,
           sessionId: session.id,
           processId: handle.pid,
-          taskId: options.taskId
+          taskId: options.taskId,
+          agentId: options.agentId
         };
 
         // Session history tracking
@@ -336,8 +334,14 @@ export class TerminalRuntime {
         });
 
         // Observability
+        this.metrics.setActiveProcesses(this.processManager.getActiveProcessCount());
         this.audit.logExecution(result, cwd);
-        this.metrics.recordCommand(durationMs, code === 0);
+        this.metrics.recordCommand({
+          durationMs,
+          status: finalStatus,
+          timedOut: handle.state === 'timeout',
+          truncated: stdoutBuffer.truncated || stderrBuffer.truncated
+        });
         this.events.emitProcessExited(code, durationMs, signal, { ...context, processId: handle.pid });
 
         resolve(result);
@@ -359,11 +363,13 @@ export class TerminalRuntime {
           truncated: false,
           sessionId: session.id,
           taskId: options.taskId,
+          agentId: options.agentId,
           error: err
         };
 
+        this.metrics.setActiveProcesses(this.processManager.getActiveProcessCount());
         this.audit.logExecution(result, cwd);
-        this.metrics.recordCommand(durationMs, false);
+        this.metrics.recordCommand({ durationMs, status: 'failed', timedOut: false });
         this.events.emitProcessFailed(err.message, durationMs, { ...context, processId: handle.pid });
 
         resolve(result);
@@ -374,32 +380,25 @@ export class TerminalRuntime {
   public async startBackground(command: string, options: CommandExecutionOptions = {}): Promise<BackgroundJob> {
     const session = this.sessionManager.getOrCreateSession(options.sessionId, options.cwd);
     const cwd = options.cwd ?? session.cwd;
-    const context = { sessionId: session.id, taskId: options.taskId };
+    const context = { sessionId: session.id, taskId: options.taskId, agentId: options.agentId };
     if (!this.sandboxManager.isInitialized()) {
       await this.sandboxManager.initialize();
     }
 
-    // 1. Policy & permission check for background execution
+    // 1. Policy & permission check for background execution (two-layer)
     const optsWithBackground: CommandExecutionOptions = { ...options, background: true };
-    const decision = this.policy.evaluate(command, optsWithBackground);
+    const bgAuthResult = await this.authorizeExecution(command, cwd, session.id, optsWithBackground, context);
 
-    if (decision.action === 'deny') {
-      throw new Error(`Background execution denied by policy: ${decision.reason ?? command}`);
+    if (bgAuthResult.action === 'deny') {
+      throw new Error(`Background execution denied: ${bgAuthResult.reason ?? command}`);
     }
 
-    if (decision.action === 'require_approval') {
-      this.events.emitApprovalRequired(command, decision.reason ?? 'Approval required', context);
-      const approved = await this.approvalManager.requestApproval(
-        command,
-        decision.reason ?? 'Background command requires approval'
-      );
-      if (!approved) {
-        throw new Error(`Background execution blocked: ${decision.reason ?? 'Approval required but not granted.'}`);
-      }
+    if (bgAuthResult.action === 'approval_required') {
+      throw new Error(`Background execution blocked: ${bgAuthResult.reason ?? 'Approval required but not granted.'}`);
     }
 
     // 2. Prepare environment & wrap command
-    const effectiveCommand = decision.modifiedCommand ?? command;
+    const effectiveCommand = bgAuthResult.modifiedCommand ?? command;
     const wrapResult2 = this.sandboxManager.wrapCommand(effectiveCommand, cwd);
     const wrappedCommand2 = wrapResult2.command;
     const baseBuilt2 = this.environment.buildEnvironment({
@@ -423,6 +422,7 @@ export class TerminalRuntime {
     });
 
     session.attachProcess(handle.id);
+    this.metrics.setActiveProcesses(this.processManager.getActiveProcessCount());
 
     if (handle.pid) {
       this.events.emitProcessStarted(handle.pid, context);
@@ -444,11 +444,13 @@ export class TerminalRuntime {
 
     handle.child.once('close', (code, signal) => {
       session.detachProcess(handle.id);
+      this.metrics.setActiveProcesses(this.processManager.getActiveProcessCount());
       this.events.emitProcessExited(code, handle.durationMs, signal, { ...context, processId: handle.pid });
     });
 
     handle.child.once('error', (err) => {
       session.detachProcess(handle.id);
+      this.metrics.setActiveProcesses(this.processManager.getActiveProcessCount());
       this.events.emitProcessFailed(err.message, handle.durationMs, { ...context, processId: handle.pid });
     });
 
@@ -481,13 +483,43 @@ export class TerminalRuntime {
     };
 
     this.backgroundJobs.set(job.id, job);
+    this.metrics.recordBackgroundJob();
     return job;
   }
 
   public spawnPty(command: string, args: string[] = [], options: PtySpawnOptions = {}): IPtyInstance {
     const session = this.sessionManager.getOrCreateSession(options.sessionId, options.cwd);
     const cwd = options.cwd ?? session.cwd;
-    const optsWithCwd: PtySpawnOptions = { ...options, cwd };
+    const fullCmd = args.length > 0 ? `${command} ${args.join(' ')}` : command;
+
+    // 1. Policy evaluation
+    const policyDecision = this.policy.evaluate(fullCmd, { cwd, sessionId: session.id });
+    if (policyDecision.action === 'deny') {
+      throw new Error(`PTY execution denied by policy: ${policyDecision.reason ?? fullCmd}`);
+    }
+
+    // 2. Permission evaluation
+    const permDecision = this.permissionRules.evaluate(fullCmd, { cwd, sessionId: session.id });
+    if (permDecision.action === 'deny') {
+      throw new Error(`PTY execution denied by security rules: ${permDecision.reason ?? fullCmd}`);
+    }
+
+    // 3. Filtered environment
+    const filteredEnv = this.environment.buildEnvironment({
+      baseEnv: session.getEnv(),
+      sessionEnv: session.getEnv(),
+      requestEnv: options.env,
+      nonInteractive: false
+    });
+
+    // 4. Record metric
+    this.metrics.recordPtySession();
+
+    const optsWithCwd: PtySpawnOptions = {
+      ...options,
+      cwd,
+      env: filteredEnv
+    };
     return PtyExecutor.spawnPty(command, args, optsWithCwd);
   }
 
@@ -553,8 +585,137 @@ export class TerminalRuntime {
     return closed;
   }
 
+  public getSession(sessionId?: SessionId): TerminalSession | undefined {
+    return this.sessionManager.getSession(sessionId);
+  }
+
+  public async executeInSession(
+    sessionId: SessionId,
+    command: string,
+    options: Omit<CommandExecutionOptions, 'sessionId'> = {}
+  ): Promise<CommandResult> {
+    return this.execute(command, { ...options, sessionId });
+  }
+
+  public writeToSession(sessionId: SessionId, data: string): boolean {
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session) return false;
+    const processIds = session.getActiveProcessIds();
+    let written = false;
+    for (const pid of processIds) {
+      const handle = this.processManager.get(pid);
+      if (handle && handle.isAlive) {
+        if (handle.writeInput(data)) {
+          written = true;
+        }
+      }
+    }
+    return written;
+  }
+
+  public interruptSession(sessionId: SessionId): boolean {
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session) return false;
+    const processIds = session.getActiveProcessIds();
+    let interrupted = false;
+    for (const pid of processIds) {
+      if (this.processManager.signal(pid, 'SIGINT')) {
+        interrupted = true;
+      }
+    }
+    return interrupted;
+  }
+
+  public detachSession(sessionId: SessionId): boolean {
+    return this.sessionManager.detach(sessionId) !== undefined;
+  }
+
+  public attachSession(sessionId: SessionId): boolean {
+    return this.sessionManager.attach(sessionId) !== undefined;
+  }
+
   public cleanup(): void {
     this.processManager.cleanup();
+  }
+
+  /**
+   * Two-layer authorization: TerminalPolicy → PermissionRules → ApprovalManager.
+   * Returns a unified decision including modifiedCommand/timeouts from policy.
+   */
+  private async authorizeExecution(
+    command: string,
+    cwd: string,
+    sessionId: string,
+    options: CommandExecutionOptions,
+    context: { sessionId?: string; taskId?: string; agentId?: string } = {}
+  ): Promise<{
+    action: 'allow' | 'deny' | 'approval_required';
+    reason?: string;
+    modifiedCommand?: string;
+    effectiveTimeoutMs?: number;
+    maxOutputBytes?: number;
+  }> {
+    // Layer 1: TerminalPolicy (timeout, output bounds, command transforms)
+    const policyDecision = this.policy.evaluate(command, options);
+
+    if (policyDecision.action === 'deny') {
+      return {
+        action: 'deny',
+        reason: policyDecision.reason ?? 'Command denied by terminal policy.',
+        modifiedCommand: policyDecision.modifiedCommand,
+        effectiveTimeoutMs: policyDecision.effectiveTimeoutMs,
+        maxOutputBytes: policyDecision.maxOutputBytes
+      };
+    }
+
+    // Layer 2: PermissionRules (security rules: destructive ops, sudo, etc.)
+    const permDecision = this.permissionRules.evaluate(command, { cwd, sessionId });
+
+    if (permDecision.action === 'deny') {
+      return {
+        action: 'deny',
+        reason: permDecision.reason ?? 'Command denied by security rules.',
+        modifiedCommand: policyDecision.modifiedCommand,
+        effectiveTimeoutMs: policyDecision.effectiveTimeoutMs,
+        maxOutputBytes: policyDecision.maxOutputBytes
+      };
+    }
+
+    // Determine if approval is needed (either layer can require it)
+    const needsApproval =
+      policyDecision.action === 'require_approval' || permDecision.action === 'require_approval';
+
+    if (needsApproval) {
+      const reason =
+        policyDecision.action === 'require_approval'
+          ? (policyDecision.reason ?? 'Approval required by policy.')
+          : (permDecision.reason ?? 'Approval required by security rules.');
+
+      this.events.emitApprovalRequired(command, reason, context);
+      const approved = await this.approvalManager.requestApproval(command, reason, {
+        cwd,
+        sessionId,
+        taskId: options.taskId,
+        agentId: options.agentId
+      });
+
+      if (!approved) {
+        return {
+          action: 'approval_required',
+          reason,
+          modifiedCommand: policyDecision.modifiedCommand,
+          effectiveTimeoutMs: policyDecision.effectiveTimeoutMs,
+          maxOutputBytes: policyDecision.maxOutputBytes
+        };
+      }
+    }
+
+    return {
+      action: 'allow',
+      modifiedCommand: policyDecision.modifiedCommand,
+      effectiveTimeoutMs: policyDecision.effectiveTimeoutMs,
+      maxOutputBytes: policyDecision.maxOutputBytes
+    };
   }
 
   private checkCdCommand(command: string): { isCd: boolean; target?: string } {

@@ -136,21 +136,49 @@ describe('Terminal-New Phase 9 (Checkpoints & Rollback Engine)', () => {
       assert.equal(result.status, 'not_found');
     });
 
-    it('restores directory snapshot cleanly (success)', async () => {
+    it('restores directory snapshot cleanly and removes files created after snapshot', async () => {
       const manager = new SnapshotManager();
-      const fileToTrack = path.join(nonGitDir, 'important.txt');
-      fs.writeFileSync(fileToTrack, 'original state');
+      const fileA = path.join(nonGitDir, 'A.txt');
+      fs.writeFileSync(fileA, 'initial A');
 
       const snapshot = await manager.createSnapshot(nonGitDir);
 
-      // Mutate directory
-      fs.writeFileSync(fileToTrack, 'corrupted state');
-      assert.equal(fs.readFileSync(fileToTrack, 'utf-8'), 'corrupted state');
+      // Mutate directory: modify A.txt, create B.txt and C.txt
+      fs.writeFileSync(fileA, 'modified A');
+      const fileB = path.join(nonGitDir, 'B.txt');
+      const fileC = path.join(nonGitDir, 'C.txt');
+      fs.writeFileSync(fileB, 'new B');
+      fs.writeFileSync(fileC, 'new C');
+
+      assert.equal(fs.existsSync(fileB), true);
+      assert.equal(fs.existsSync(fileC), true);
 
       // Rollback
       const result = await RollbackEngine.rollback(snapshot.id, manager);
       assert.equal(result.status, 'success');
-      assert.equal(fs.readFileSync(fileToTrack, 'utf-8'), 'original state');
+      assert.equal(fs.readFileSync(fileA, 'utf-8'), 'initial A');
+
+      // Section 9.2: Rollback must remove files created after the snapshot
+      assert.equal(fs.existsSync(fileB), false, 'B.txt created after snapshot must be removed');
+      assert.equal(fs.existsSync(fileC), false, 'C.txt created after snapshot must be removed');
+    });
+
+    it('rolls back clean git repository checkpoint without stash error', async () => {
+      const manager = new SnapshotManager();
+      const snapshot = await manager.createSnapshot(gitRepoDir);
+
+      assert.equal(snapshot.type, 'git');
+      assert.equal(snapshot.isStash, false); // Clean tree = commit ref
+
+      // Create new untracked and modified file
+      const newGitFile = path.join(gitRepoDir, 'untracked_post_snap.txt');
+      fs.writeFileSync(newGitFile, 'untracked content');
+      assert.equal(fs.existsSync(newGitFile), true);
+
+      // Rollback
+      const result = await RollbackEngine.rollback(snapshot.id, manager);
+      assert.equal(result.status, 'success');
+      assert.equal(fs.existsSync(newGitFile), false, 'Untracked file must be removed by git rollback');
     });
 
     it('returns not_supported when target directory was deleted', async () => {

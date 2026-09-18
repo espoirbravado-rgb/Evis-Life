@@ -92,4 +92,43 @@ describe('Terminal-New Phase 5 (PTY & Pseudo-terminal)', () => {
     const exitCode = await exitPromise;
     assert.notEqual(exitCode, 0);
   });
+
+  it('rejects destructive commands in spawnPty via policy and permission rules', () => {
+    const runtime = new TerminalRuntime();
+    assert.throws(
+      () => {
+        runtime.spawnPty('rm', ['-rf', '/']);
+      },
+      /PTY execution denied/
+    );
+  });
+
+  it('records PTY session in MetricsCollector upon spawn', () => {
+    const runtime = new TerminalRuntime();
+    const initial = runtime.metrics.getMetrics().ptySessionsStarted;
+
+    const pty = runtime.spawnPty('echo', ['hello']);
+    const updated = runtime.metrics.getMetrics().ptySessionsStarted;
+
+    assert.equal(updated, initial + 1);
+    pty.kill('SIGKILL');
+  });
+
+  it('filters sensitive host environment variables from PTY', async () => {
+    process.env.TEST_PTY_SECRET_TOKEN = 'secret_pty_token_123';
+    const runtime = new TerminalRuntime();
+
+    const outputChunks: string[] = [];
+    const pty = runtime.spawnPty('bash', ['-c', '"echo TOKEN=$TEST_PTY_SECRET_TOKEN"']);
+
+    pty.onData((data) => outputChunks.push(data));
+
+    await new Promise<number>((resolve) => {
+      pty.onExit((code) => resolve(code));
+    });
+
+    delete process.env.TEST_PTY_SECRET_TOKEN;
+    const combined = outputChunks.join('');
+    assert.ok(!combined.includes('secret_pty_token_123'), 'Secrets must not leak into PTY');
+  });
 });

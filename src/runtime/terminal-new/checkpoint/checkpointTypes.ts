@@ -15,6 +15,7 @@ export interface CheckpointSnapshot {
   description?: string;
   gitCommitOrStashSha?: string;
   stashRef?: string;
+  isStash?: boolean;
   backupPath?: string;
   metadata?: Record<string, unknown>;
 }

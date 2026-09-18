@@ -20,7 +20,7 @@ export class ProcessHandle {
   private _error?: Error;
   private readonly _startedAt: number = Date.now();
   private _finishedAt: number | null = null;
-  private _targetStateOnClose?: 'killed' | 'timeout';
+  private _targetStateOnClose?: 'killed' | 'timeout' | 'cancelled';
 
   private readonly stdoutBuffer: OutputBuffer;
   private readonly stderrBuffer: OutputBuffer;
@@ -133,7 +133,7 @@ export class ProcessHandle {
 
   public get isAlive(): boolean {
     if (!this.child.pid) return false;
-    if (['exited', 'failed', 'killed', 'timeout'].includes(this._state)) return false;
+    if (['exited', 'failed', 'killed', 'timeout', 'cancelled'].includes(this._state)) return false;
     return ProcessSignals.isAlive(this.child.pid);
   }
 
@@ -168,6 +168,12 @@ export class ProcessHandle {
     if (!this.child.pid || !this.isAlive) return false;
     this._targetStateOnClose = 'timeout';
     return this.kill('SIGKILL');
+  }
+
+  public markCancelled(): boolean {
+    if (!this.child.pid || !this.isAlive) return false;
+    this._targetStateOnClose = 'cancelled';
+    return this.kill('SIGTERM');
   }
 
   public writeInput(data: string): boolean {

@@ -46,6 +46,10 @@ export class ProcessManager {
     return this.registry.listActive();
   }
 
+  public getActiveProcessCount(): number {
+    return this.registry.listActive().length;
+  }
+
   public listAll(): ProcessHandle[] {
     return this.registry.listAll();
   }

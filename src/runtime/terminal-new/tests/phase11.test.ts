@@ -48,6 +48,37 @@ describe('Terminal-New Phase 11 (Agent Integration & Execution Boundary)', () =>
   });
 
   describe('Agent Tool Execution Pipeline', () => {
+    it('executes through full ToolExecutor -> ToolRegistry -> PermissionManager -> TerminalTool pipeline', async () => {
+      const composition = new RuntimeComposition();
+      const executor = composition.getToolExecutor();
+      const terminalImpl = composition.getImplementations().find((impl) => impl.toolId === 'terminal') as TerminalTool;
+
+      const call: IToolCall = {
+        id: 'call_full_pipeline_1',
+        toolId: 'terminal',
+        arguments: { command: 'echo "full architecture path verified"' },
+      };
+
+      const context = createContext({
+        metadata: { agentId: 'agent_coder_99', taskId: 'task_audit_trace_77' },
+      });
+
+      const result = await executor.execute({
+        call,
+        context,
+        resolvedCapabilities: ['terminal.execute'],
+      });
+
+      assert.equal(result.status, 'success');
+      assert.match(result.stdout ?? '', /full architecture path verified/);
+
+      // Section 11.4: The final audit must answer which agent caused this process
+      const records = terminalImpl.getRuntime().audit.getRecords({ taskId: 'task_audit_trace_77' });
+      assert.ok(records.length >= 1);
+      assert.equal(records[0].agentId, 'agent_coder_99');
+      assert.equal(records[0].taskId, 'task_audit_trace_77');
+    });
+
     it('executes shell commands and returns structured IToolResult on success', async () => {
       const tool = new TerminalTool();
       const call: IToolCall = {

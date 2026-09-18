@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--rows', type=int, default=24)
     parser.add_argument('--cwd', type=str, default=os.getcwd())
     parser.add_argument('--cmd', type=str, required=True)
+    parser.add_argument('--shell', type=str, default=os.environ.get('SHELL', '/bin/bash'))
     args = parser.parse_args()
 
     master, slave = pty.openpty()
@@ -44,8 +45,8 @@ def main():
         except Exception:
             pass
 
-        # Execute using default shell
-        shell = os.environ.get('SHELL', '/bin/bash')
+        # Execute using specified shell
+        shell = args.shell
         os.execlp(shell, shell, '-c', args.cmd)
         sys.exit(127)
 

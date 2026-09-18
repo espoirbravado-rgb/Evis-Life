@@ -152,10 +152,13 @@ export class TerminalEnvironment {
   private isKeyBlocked(key: string): boolean {
     if (this.blockedKeys.has(key)) return true;
     const upper = key.toUpperCase();
-    if (upper.endsWith('_SECRET') || upper.endsWith('_TOKEN') || upper.endsWith('_KEY') && !['SSH_KEY', 'COLORKEY'].includes(upper)) {
-      if (['AWS_', 'GITHUB_', 'GH_', 'TOKEN_', 'SECRET_', 'API_KEY'].some(p => upper.startsWith(p))) {
-        return true;
-      }
+    if (
+      upper.includes('SECRET') ||
+      upper.includes('TOKEN') ||
+      upper.includes('PASSWORD') ||
+      upper.includes('API_KEY')
+    ) {
+      return true;
     }
     return false;
   }

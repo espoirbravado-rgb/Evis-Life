@@ -14,7 +14,8 @@ describe('Terminal-New Phase 3 (Streaming & Events)', () => {
       });
 
       const result = await runtime.execute('echo "stream chunk 1" && echo "stream chunk 2"', {
-        taskId: 'task_lifecycle_1'
+        taskId: 'task_lifecycle_1',
+        agentId: 'agent-stream-1'
       });
 
       assert.equal(result.status, 'completed');
@@ -32,6 +33,7 @@ describe('Terminal-New Phase 3 (Streaming & Events)', () => {
         assert.ok(ev.eventId);
         assert.ok(ev.timestamp > 0);
         assert.equal(ev.taskId, 'task_lifecycle_1');
+        assert.equal(ev.agentId, 'agent-stream-1');
       }
 
       // Check chronological order

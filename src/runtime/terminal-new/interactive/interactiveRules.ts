@@ -17,21 +17,21 @@ export const DEFAULT_PROMPT_RULES: PromptRule[] = [
   {
     name: 'password-prompt',
     category: 'security_elevation',
-    pattern: /(password|passphrase)\s*for\s+.*:/i,
+    pattern: /\b(password|passphrase|credential)s?\s*(for\s+[^:]+)?\s*:/i,
     isDangerous: true,
     requiresApproval: true
   },
   {
     name: 'destructive-confirmation',
     category: 'destructive_confirmation',
-    pattern: /(are you sure you want to delete|permanently delete|remove all|erase)\b/i,
+    pattern: /\b(are you sure|confirm\s+(deletion|overwrite)|permanently delete|remove all|erase)\b/i,
     isDangerous: true,
     requiresApproval: true
   },
   {
     name: 'git-destructive-prompt',
     category: 'destructive_confirmation',
-    pattern: /(force push|discard local changes|hard reset)\b/i,
+    pattern: /\b(force\s+push|git\s+push\s+--force|discard local changes|hard\s+reset|git\s+reset\s+--hard)\b/i,
     isDangerous: true,
     requiresApproval: true
   },

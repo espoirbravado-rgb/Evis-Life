@@ -51,6 +51,51 @@ describe('Terminal-New Phase 7 (Security & Permission Engine)', () => {
       assert.equal(approveResult, false);
       assert.equal(manager.getRequest(req.requestId)?.status, 'expired');
     });
+
+    it('rejects approval consumption across different sessions or agents', () => {
+      const manager = new ApprovalManager();
+      const req = manager.createRequest('npm publish', 'Publish package', {
+        sessionId: 'session_alpha',
+        agentId: 'agent_coder_1'
+      });
+
+      manager.approve(req.requestId);
+
+      // Attempt to consume in a different session
+      const wrongSession = manager.consumeApproval(req.requestId, 'npm publish', {
+        sessionId: 'session_beta',
+        agentId: 'agent_coder_1'
+      });
+      assert.equal(wrongSession, false);
+
+      // Attempt to consume by a different agent
+      const wrongAgent = manager.consumeApproval(req.requestId, 'npm publish', {
+        sessionId: 'session_alpha',
+        agentId: 'agent_attacker_2'
+      });
+      assert.equal(wrongAgent, false);
+
+      // Consume with exact matching context succeeds
+      const correctContext = manager.consumeApproval(req.requestId, 'npm publish', {
+        sessionId: 'session_alpha',
+        agentId: 'agent_coder_1'
+      });
+      assert.equal(correctContext, true);
+    });
+
+    it('transitions to rejected state when explicitly rejected', () => {
+      const manager = new ApprovalManager();
+      const req = manager.createRequest('reboot', 'System reboot');
+
+      assert.equal(req.status, 'pending');
+      const rejected = manager.reject(req.requestId);
+      assert.equal(rejected, true);
+      assert.equal(manager.getRequest(req.requestId)?.status, 'rejected');
+
+      // Cannot consume rejected request
+      const consumed = manager.consumeApproval(req.requestId, 'reboot');
+      assert.equal(consumed, false);
+    });
   });
 
   describe('Permission Engine & Deterministic Priority', () => {

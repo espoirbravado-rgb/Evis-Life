@@ -8,6 +8,7 @@ export interface BaseTerminalEvent {
   sessionId?: SessionId;
   processId?: number;
   taskId?: TaskId;
+  agentId?: string;
 }
 
 export interface ProcessCreatedEvent extends BaseTerminalEvent {
@@ -88,6 +89,13 @@ export type TerminalEvent =
   | SessionCreatedEvent
   | SessionClosedEvent;
 
+export interface TerminalEventContext {
+  sessionId?: SessionId;
+  taskId?: TaskId;
+  agentId?: string;
+  processId?: number;
+}
+
 export class TerminalEventEmitter extends EventEmitter {
   public emitEvent(event: TerminalEvent): void {
     this.emit('event', event);
@@ -101,7 +109,7 @@ export class TerminalEventEmitter extends EventEmitter {
     };
   }
 
-  public emitProcessCreated(command: string, cwd: string, context?: { sessionId?: SessionId; taskId?: TaskId }): void {
+  public emitProcessCreated(command: string, cwd: string, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'process_created',
@@ -109,11 +117,12 @@ export class TerminalEventEmitter extends EventEmitter {
       command,
       cwd,
       sessionId: context?.sessionId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitProcessStarted(pid: number, context?: { sessionId?: SessionId; taskId?: TaskId }): void {
+  public emitProcessStarted(pid: number, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'process_started',
@@ -121,11 +130,12 @@ export class TerminalEventEmitter extends EventEmitter {
       pid,
       processId: pid,
       sessionId: context?.sessionId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitStdout(data: string, context?: { sessionId?: SessionId; processId?: number; taskId?: TaskId }): void {
+  public emitStdout(data: string, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'stdout',
@@ -133,11 +143,12 @@ export class TerminalEventEmitter extends EventEmitter {
       data,
       sessionId: context?.sessionId,
       processId: context?.processId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitStderr(data: string, context?: { sessionId?: SessionId; processId?: number; taskId?: TaskId }): void {
+  public emitStderr(data: string, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'stderr',
@@ -145,11 +156,12 @@ export class TerminalEventEmitter extends EventEmitter {
       data,
       sessionId: context?.sessionId,
       processId: context?.processId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitPromptDetected(promptText: string, context?: { sessionId?: SessionId; processId?: number; taskId?: TaskId }): void {
+  public emitPromptDetected(promptText: string, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'prompt_detected',
@@ -157,11 +169,12 @@ export class TerminalEventEmitter extends EventEmitter {
       promptText,
       sessionId: context?.sessionId,
       processId: context?.processId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitApprovalRequired(command: string, reason: string, context?: { sessionId?: SessionId; taskId?: TaskId }): void {
+  public emitApprovalRequired(command: string, reason: string, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'approval_required',
@@ -169,11 +182,12 @@ export class TerminalEventEmitter extends EventEmitter {
       command,
       reason,
       sessionId: context?.sessionId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitProcessSignal(signal: string, context?: { sessionId?: SessionId; processId?: number; taskId?: TaskId }): void {
+  public emitProcessSignal(signal: string, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'process_signal',
@@ -181,11 +195,12 @@ export class TerminalEventEmitter extends EventEmitter {
       signal,
       sessionId: context?.sessionId,
       processId: context?.processId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitProcessTimeout(durationMs: number, context?: { sessionId?: SessionId; processId?: number; taskId?: TaskId }): void {
+  public emitProcessTimeout(durationMs: number, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'process_timeout',
@@ -193,11 +208,12 @@ export class TerminalEventEmitter extends EventEmitter {
       durationMs,
       sessionId: context?.sessionId,
       processId: context?.processId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitProcessExited(exitCode: number | null, durationMs: number, signal?: string | null, context?: { sessionId?: SessionId; processId?: number; taskId?: TaskId }): void {
+  public emitProcessExited(exitCode: number | null, durationMs: number, signal?: string | null, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'process_exited',
@@ -207,11 +223,12 @@ export class TerminalEventEmitter extends EventEmitter {
       durationMs,
       sessionId: context?.sessionId,
       processId: context?.processId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 
-  public emitProcessFailed(error: string, durationMs: number, context?: { sessionId?: SessionId; processId?: number; taskId?: TaskId }): void {
+  public emitProcessFailed(error: string, durationMs: number, context?: TerminalEventContext): void {
     this.emitEvent({
       eventId: randomUUID(),
       type: 'process_failed',
@@ -220,7 +237,8 @@ export class TerminalEventEmitter extends EventEmitter {
       durationMs,
       sessionId: context?.sessionId,
       processId: context?.processId,
-      taskId: context?.taskId
+      taskId: context?.taskId,
+      agentId: context?.agentId
     });
   }
 

@@ -55,6 +55,7 @@ export class SnapshotManager {
         description: options.description ?? `Git checkpoint ${id}`,
         gitCommitOrStashSha: stashResult.stashSha,
         stashRef: stashResult.stashRef,
+        isStash: stashResult.hasStashedChanges,
       };
 
       this.snapshots.set(id, snapshot);

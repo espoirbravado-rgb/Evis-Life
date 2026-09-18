@@ -6,7 +6,7 @@ export class SecretRedactor {
     // AWS Access Keys
     /AKIA[0-9A-Z]{16}/g,
     // GitHub Tokens (Personal & App tokens)
-    /gh[pousr]_[0-9a-zA-Z]{36}/g,
+    /gh[pousr]_[0-9a-zA-Z]{20,}/g,
     /github_pat_[0-9a-zA-Z_]{82}/g,
     // Bearer authorization headers
     /(Bearer\s+)[a-zA-Z0-9_\-\.]{20,}/gi,

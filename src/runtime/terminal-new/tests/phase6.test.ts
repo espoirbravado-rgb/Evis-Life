@@ -35,6 +35,40 @@ describe('Terminal-New Phase 6 (Interactive Automation)', () => {
       assert.equal(detected.isDangerous, true);
       assert.equal(detected.requiresApproval, true);
     });
+
+    it('classifies all Section 6.4 dangerous prompts correctly and requires approval', () => {
+      const detector = new PromptDetector();
+      const dangerousPrompts = [
+        'password: ',
+        'Enter passphrase: ',
+        'Are you sure? (yes/no)',
+        'Please confirm deletion of /data/prod',
+        'Warning: git push --force will overwrite remote history',
+        'Executing git reset --hard will discard uncommitted work',
+        'The authenticity of host cannot be established. Are you sure you want to continue connecting (yes/no)?'
+      ];
+
+      for (const promptText of dangerousPrompts) {
+        const detected = detector.detect(promptText);
+        assert.ok(detected, `Prompt "${promptText}" must be detected`);
+        assert.equal(detected.isDangerous, true, `Prompt "${promptText}" must be marked dangerous`);
+        assert.equal(detected.requiresApproval, true, `Prompt "${promptText}" must require approval`);
+      }
+    });
+
+    it('classifies safe prompts [y/N] and [Y/n] accurately', () => {
+      const detector = new PromptDetector();
+
+      const yN = detector.detect('Proceed with action? [y/N]');
+      assert.ok(yN);
+      assert.equal(yN.isDangerous, false);
+      assert.equal(yN.requiresApproval, false);
+
+      const Yn = detector.detect('Apply defaults? [Y/n]');
+      assert.ok(Yn);
+      assert.equal(Yn.isDangerous, false);
+      assert.equal(Yn.requiresApproval, false);
+    });
   });
 
   describe('Security-First Prompt Responder', () => {

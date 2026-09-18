@@ -159,4 +159,67 @@ describe('Terminal-New Phase 2 (Sessions)', () => {
       assert.ok(!json.includes('super_secret_123'));
     });
   });
+
+  describe('Session Lifecycle and Control Methods', () => {
+    it('executes commands via executeInSession and persists session state', async () => {
+      const runtime = new TerminalRuntime();
+      const sessionId = runtime.createSession();
+
+      const r1 = await runtime.executeInSession(sessionId, 'export FOO_BAR=baz_qux');
+      assert.equal(r1.status, 'completed');
+
+      const r2 = await runtime.executeInSession(sessionId, 'echo "FOO=$FOO_BAR"');
+      assert.equal(r2.status, 'completed');
+      assert.match(r2.stdout, /FOO=baz_qux/);
+
+      const session = runtime.getSession(sessionId);
+      assert.ok(session);
+      assert.equal(session.id, sessionId);
+    });
+
+    it('command failure does not destroy or close the session', async () => {
+      const runtime = new TerminalRuntime();
+      const sessionId = runtime.createSession();
+
+      const failedResult = await runtime.executeInSession(sessionId, 'bash -c "exit 5"');
+      assert.equal(failedResult.status, 'failed');
+      assert.equal(failedResult.exitCode, 5);
+
+      const session = runtime.getSession(sessionId);
+      assert.ok(session);
+      assert.equal(session.status, 'active');
+
+      const okResult = await runtime.executeInSession(sessionId, 'echo "session is alive"');
+      assert.equal(okResult.status, 'completed');
+      assert.match(okResult.stdout, /session is alive/);
+    });
+
+    it('supports detaching and reattaching sessions', async () => {
+      const runtime = new TerminalRuntime();
+      const sessionId = runtime.createSession();
+
+      const detached = runtime.detachSession(sessionId);
+      assert.equal(detached, true);
+      assert.equal(runtime.getSession(sessionId)?.status, 'detached');
+
+      const attached = runtime.attachSession(sessionId);
+      assert.equal(attached, true);
+      assert.equal(runtime.getSession(sessionId)?.status, 'active');
+    });
+
+    it('can interrupt a running process in session via interruptSession', async () => {
+      const runtime = new TerminalRuntime();
+      const sessionId = runtime.createSession();
+
+      const execPromise = runtime.executeInSession(sessionId, 'sleep 10');
+      // Wait for process to spawn
+      await new Promise(r => setTimeout(r, 30));
+
+      const interrupted = runtime.interruptSession(sessionId);
+      assert.equal(interrupted, true);
+
+      const result = await execPromise;
+      assert.ok(result.durationMs < 2000);
+    });
+  });
 });

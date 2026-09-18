@@ -74,6 +74,7 @@ export class TerminalTool implements IToolImplementation {
       }
 
       const taskId = typeof context.metadata?.taskId === 'string' ? context.metadata.taskId : undefined;
+      const agentId = typeof context.metadata?.agentId === 'string' ? context.metadata.agentId : undefined;
 
       // Execute via the full TerminalRuntime
       // Only supply explicit cwd if requested; otherwise preserve the session's persistent cwd
@@ -81,6 +82,7 @@ export class TerminalTool implements IToolImplementation {
         cwd: cwd ?? (this.runtime.sessionManager.hasSession(context.sessionId) ? undefined : context.environment?.workspaceRoot),
         sessionId: context.sessionId,
         taskId,
+        agentId,
       });
 
       let status: ToolExecutionStatus = 'failed';
@@ -108,6 +110,7 @@ export class TerminalTool implements IToolImplementation {
           timedOut: result.timedOut,
           truncated: result.truncated,
           sessionId: result.sessionId,
+          processId: result.processId,
         },
         error: isSuccess
           ? undefined

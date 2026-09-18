@@ -63,7 +63,9 @@ export class RollbackEngine {
         };
       }
 
-      const applyResult = GitStashAdapter.applyStash(snapshot.cwd, targetRef);
+      const applyResult = snapshot.isStash
+        ? GitStashAdapter.applyStash(snapshot.cwd, targetRef)
+        : GitStashAdapter.restoreCommit(snapshot.cwd, targetRef);
 
       if (applyResult.success) {
         return {
@@ -98,7 +100,7 @@ export class RollbackEngine {
       }
 
       try {
-        // Restore directory contents
+        // Restore directory contents (pruning newly created files and overwriting modified)
         await this.restoreDirectory(snapshot.backupPath, snapshot.cwd);
         return {
           status: 'success',
@@ -122,9 +124,25 @@ export class RollbackEngine {
   }
 
   /**
-   * Restores files from backup directory into target cwd.
+   * Restores files from backup directory into target cwd:
+   * 1. Removes files and directories in targetDir that do not exist in backupDir.
+   * 2. Copies files from backupDir into targetDir.
    */
   private static async restoreDirectory(backupDir: string, targetDir: string): Promise<void> {
+    // 1. Prune newly created files/directories in targetDir
+    if (fs.existsSync(targetDir)) {
+      const targetEntries = fs.readdirSync(targetDir, { withFileTypes: true });
+      for (const entry of targetEntries) {
+        if (entry.name === '.git') continue;
+        const backupPath = path.join(backupDir, entry.name);
+        const targetPath = path.join(targetDir, entry.name);
+        if (!fs.existsSync(backupPath)) {
+          fs.rmSync(targetPath, { recursive: true, force: true });
+        }
+      }
+    }
+
+    // 2. Restore all files and subdirectories from backupDir
     const entries = fs.readdirSync(backupDir, { withFileTypes: true });
     for (const entry of entries) {
       const srcPath = path.join(backupDir, entry.name);
