@@ -1,121 +1,119 @@
-import { DefaultTerminalEnvironment } from "./terminalEnvironment";
-import { NodeTerminalExecutor } from "./terminalExecutor";
-import { TerminalSecurityManager } from "./terminalPolicy";
+
 import type {
-  TerminalApprovalGrant,
-  TerminalApprovalRequest,
+  TerminalEnvironment,
   TerminalExecutionResult,
+  TerminalExecutor,
+  TerminalPolicy,
   TerminalRequest,
-  TerminalRuntimeOptions,
+  TerminalResultStatus,
 } from "./terminalTypes";
 
 export class TerminalRuntime {
-  private readonly environment: DefaultTerminalEnvironment;
-  private readonly security: TerminalSecurityManager;
-  private readonly executor: NodeTerminalExecutor;
-  private readonly defaultCwd?: string;
+  constructor(
+    private readonly policy: {
+      evaluate(
+        request: TerminalRequest,
+      ): Promise<{
+        decision: "allow" | "deny" | "require_approval";
+        reason?: string;
+        approvalRequest?: NonNullable<
+          TerminalExecutionResult["approvalRequest"]
+        >;
+      }>;
+    },
+    private readonly environment: TerminalEnvironment,
+    private readonly executor: TerminalExecutor,
+  ) {}
 
-  constructor(options: TerminalRuntimeOptions = {}) {
-    this.environment = new DefaultTerminalEnvironment(options.environment);
-    this.security = new TerminalSecurityManager(options.policy);
-    this.executor = new NodeTerminalExecutor(options.executor);
-    this.defaultCwd = options.defaultCwd;
-  }
+  async execute(
+    request: TerminalRequest,
+  ): Promise<TerminalExecutionResult> {
+    const startedAt = new Date();
+    const startedTime = Date.now();
 
-  async execute(request: TerminalRequest): Promise<TerminalExecutionResult> {
-    const requestedCwd = request.cwd ?? this.defaultCwd;
-    const startedAt = new Date().toISOString();
+    const policyResult = await this.policy.evaluate(request);
+
+    if (policyResult.decision !== "allow") {
+      const status: TerminalResultStatus =
+        policyResult.decision === "deny"
+          ? "policy_denied"
+          : "approval_required";
+
+      return this.createResult(
+        request,
+        status,
+        startedAt,
+        startedTime,
+        {
+          errorCode: status.toUpperCase(),
+          errorMessage: policyResult.reason,
+          approvalRequest: policyResult.approvalRequest,
+        },
+      );
+    }
 
     let context;
 
     try {
-      context = this.environment.resolve(requestedCwd, request.env);
+      context = this.environment.resolve(
+        request.cwd,
+        request.env,
+      );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Invalid Terminal environment.";
+        error instanceof Error
+          ? error.message
+          : String(error);
 
-      return this.emptyResult(
-        request,
+      const status: TerminalResultStatus =
         message.includes("does not exist")
           ? "working_directory_not_found"
-          : "execution_error",
-        message,
-        requestedCwd ?? process.cwd(),
+          : message.includes("Permission denied")
+            ? "permission_denied"
+            : "execution_error";
+
+      return this.createResult(
+        request,
+        status,
         startedAt,
+        startedTime,
+        {
+          errorCode: status.toUpperCase(),
+          errorMessage: message,
+        },
       );
     }
 
-    let policy;
-
     try {
-      policy = await this.security.authorize(
-        { ...request, cwd: context.cwd },
-        context.cwd,
+      return await this.executor.execute(
+        request,
+        context,
       );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Terminal policy evaluation failed.";
+        error instanceof Error
+          ? error.message
+          : String(error);
 
-      return this.emptyResult(
+      return this.createResult(
         request,
         "execution_error",
-        message,
-        context.cwd,
         startedAt,
+        startedTime,
+        {
+          errorCode: "RUNTIME_EXECUTION_ERROR",
+          errorMessage: message,
+        },
       );
     }
-
-    if (policy.decision === "deny") {
-      return {
-        ...this.emptyResult(
-          request,
-          "policy_denied",
-          policy.reason ?? "Terminal execution denied by policy.",
-          context.cwd,
-          startedAt,
-        ),
-      };
-    }
-
-    if (policy.decision === "require_approval") {
-      return {
-        ...this.emptyResult(
-          request,
-          "approval_required",
-          policy.reason ?? "Terminal execution requires approval.",
-          context.cwd,
-          startedAt,
-        ),
-        approvalRequest: policy.approvalRequest,
-      };
-    }
-
-    return this.executor.execute(
-      { ...request, cwd: context.cwd },
-      context,
-    );
   }
 
-  approve(requestId: string): TerminalApprovalGrant {
-    return this.security.approve(requestId);
-  }
-
-  reject(requestId: string): boolean {
-    return this.security.reject(requestId);
-  }
-
-  getPendingApproval(
-    requestId: string,
-  ): TerminalApprovalRequest | undefined {
-    return this.security.getPendingRequest(requestId);
-  }
-
-  private emptyResult(
+  private createResult(
     request: TerminalRequest,
-    status: TerminalExecutionResult["status"],
-    errorMessage: string,
-    cwd: string,
-    timestamp: string,
+    status: TerminalResultStatus,
+    startedAt: Date,
+    startedTime: number,
+    extra: Partial<TerminalExecutionResult> = {},
   ): TerminalExecutionResult {
     return {
       status,
@@ -124,12 +122,13 @@ export class TerminalRuntime {
       stdout: "",
       stderr: "",
       command: request.command,
-      args: request.args ?? [],
-      cwd,
-      startedAt: timestamp,
+      args: [...(request.args ?? [])],
+      cwd: request.cwd ?? process.cwd(),
+      startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
-      durationMs: 0,
-      errorMessage,
+      durationMs: Date.now() - startedTime,
+      ...extra,
     };
   }
 }
+

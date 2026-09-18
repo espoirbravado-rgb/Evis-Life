@@ -1,243 +1,212 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+
 import type {
-  TerminalApprovalGrant,
+  TerminalApprovalHandler,
   TerminalApprovalRequest,
+  TerminalPolicyDecision,
   TerminalPolicyEvaluation,
   TerminalPolicyOptions,
   TerminalRequest,
 } from "./terminalTypes";
 
-interface PendingApproval {
-  request: TerminalApprovalRequest;
-  fingerprint: string;
-}
+export class TerminalPolicy {
+  private readonly options: Required<TerminalPolicyOptions>;
+  private readonly approvalHandler?: TerminalApprovalHandler;
 
-interface StoredGrant {
-  token: string;
-  fingerprint: string;
-  expiresAtMs: number;
-}
-
-const DEFAULT_DANGEROUS_PATTERNS = [
-  /\brm\s+(-[^\s]+\s+)*-[^\s]*r/i,
-  /\bsudo\b/i,
-  /\bmkfs\b/i,
-  /\bdd\s+if=/i,
-  /\bshutdown\b/i,
-  /\breboot\b/i,
-  /\bpoweroff\b/i,
-  /\bkill\s+(-9|--signal\s*=?\s*9)\b/i,
-  /\bchmod\s+777\b/i,
-  /\bchown\b/i,
-];
-
-export class TerminalSecurityManager {
-  private readonly options: Required<
-    Omit<TerminalPolicyOptions, "approvalTtlMs">
-  > & { approvalTtlMs: number };
-
-  private readonly pending = new Map<string, PendingApproval>();
-  private readonly grants = new Map<string, StoredGrant>();
-
-  constructor(options: TerminalPolicyOptions = {}) {
+  constructor(
+    options: TerminalPolicyOptions = {},
+    approvalHandler?: TerminalApprovalHandler,
+  ) {
     this.options = {
-      allowShell: options.allowShell ?? true,
+      allowShell: options.allowShell ?? false,
       requireApprovalForShell:
         options.requireApprovalForShell ?? true,
       requireApprovalForPatterns:
-        options.requireApprovalForPatterns ??
-        DEFAULT_DANGEROUS_PATTERNS,
+        options.requireApprovalForPatterns ?? [],
       allowedWorkingDirectories:
         options.allowedWorkingDirectories ?? [],
-      approvalTtlMs: options.approvalTtlMs ?? 5 * 60_000,
+      approvalTtlMs: options.approvalTtlMs ?? 5 * 60 * 1000,
     };
+
+    this.approvalHandler = approvalHandler;
   }
 
-  async authorize(
+  async evaluate(
     request: TerminalRequest,
-    canonicalCwd: string,
   ): Promise<TerminalPolicyEvaluation> {
     const command = request.command.trim();
     const args = request.args ?? [];
-    const shell = request.shell ?? request.executionMode === "shell";
+    const cwd = path.resolve(request.cwd ?? process.cwd());
+    const shell = request.shell ?? false;
+    const executionMode = request.executionMode ?? "direct";
 
     if (!command) {
-      return { decision: "deny", reason: "Terminal command cannot be empty." };
+      return this.deny("Empty command.");
     }
 
-    if (!this.isWorkingDirectoryAllowed(canonicalCwd)) {
+    if (
+      executionMode === "shell" &&
+      !this.options.allowShell
+    ) {
+      return this.deny("Shell execution is disabled.");
+    }
+
+    if (
+      !this.isWorkingDirectoryAllowed(cwd)
+    ) {
+      return this.deny(
+        "Working directory is outside the allowed directories.",
+      );
+    }
+
+    const approvalReason = this.getApprovalReason(
+      request,
+      command,
+      args,
+      shell,
+      executionMode,
+    );
+
+    if (!approvalReason) {
       return {
-        decision: "deny",
-        reason: `Working directory is outside the allowed Terminal scope: ${canonicalCwd}`,
+        decision: "allow",
+        reason: "Request satisfies the configured policy.",
       };
     }
 
-    if (shell && !this.options.allowShell) {
-      return {
-        decision: "deny",
-        reason: "Shell execution is disabled by Terminal Security.",
-      };
+    return this.requestApproval(
+      request,
+      command,
+      args,
+      cwd,
+      shell,
+      approvalReason,
+    );
+  }
+
+  private getApprovalReason(
+    request: TerminalRequest,
+    command: string,
+    args: string[],
+    shell: boolean | string,
+    executionMode: string,
+  ): string | undefined {
+    if (
+      executionMode === "shell" ||
+      shell === true ||
+      typeof shell === "string"
+    ) {
+      if (this.options.requireApprovalForShell) {
+        return "Shell execution requires approval.";
+      }
     }
 
-    const needsApproval =
-      (Boolean(shell) && this.options.requireApprovalForShell) ||
-      this.options.requireApprovalForPatterns.some((pattern) => {
-        pattern.lastIndex = 0;
-        return pattern.test([command, ...args].join(" "));
-      });
+    const commandLine = [command, ...args].join(" ");
 
-    if (!needsApproval) {
-      return { decision: "allow" };
+    for (const pattern of this.options.requireApprovalForPatterns) {
+      pattern.lastIndex = 0;
+
+      if (pattern.test(commandLine)) {
+        return `Command matches approval rule: ${pattern}`;
+      }
     }
 
-    const fingerprint = this.fingerprint(request, canonicalCwd, shell);
-    const token = request.authorization?.approvalToken;
+    return undefined;
+  }
 
-    if (token) {
-      const grant = this.grants.get(token);
+  private isWorkingDirectoryAllowed(cwd: string): boolean {
+    const allowedDirectories =
+      this.options.allowedWorkingDirectories;
 
-      if (!grant) {
-        return {
-          decision: "deny",
-          reason: "Approval token is invalid, expired, or already consumed.",
-        };
-      }
-
-      // Consume before execution; concurrent reuse cannot succeed.
-      this.grants.delete(token);
-
-      if (grant.expiresAtMs <= Date.now()) {
-        return {
-          decision: "deny",
-          reason: "Approval token has expired.",
-        };
-      }
-
-      if (grant.fingerprint !== fingerprint) {
-        return {
-          decision: "deny",
-          reason: "Approval token does not match this exact command and context.",
-        };
-      }
-
-      return { decision: "allow", reason: "Explicit approval validated." };
+    if (allowedDirectories.length === 0) {
+      return true;
     }
 
+    return allowedDirectories.some((directory) => {
+      const allowedPath = path.resolve(directory);
+      const relativePath = path.relative(allowedPath, cwd);
+
+      return (
+        relativePath === "" ||
+        (
+          relativePath !== ".." &&
+          !relativePath.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relativePath)
+        )
+      );
+    });
+  }
+
+  private async requestApproval(
+    request: TerminalRequest,
+    command: string,
+    args: string[],
+    cwd: string,
+    shell: boolean | string,
+    reason: string,
+  ): Promise<TerminalPolicyEvaluation> {
     const now = Date.now();
+
     const approvalRequest: TerminalApprovalRequest = {
       id: randomUUID(),
       command,
       args: [...args],
-      cwd: canonicalCwd,
+      cwd,
       shell,
-      reason: shell
-        ? "Shell execution requires explicit user approval."
-        : "Command matches a Terminal Security rule requiring approval.",
+      execution: {
+        env: request.env
+          ? { ...request.env }
+          : undefined,
+        stdin: request.stdin,
+        timeoutMs: request.timeoutMs,
+        maxOutputBytes: request.maxOutputBytes,
+        executionMode: request.executionMode ?? "direct",
+      },
+      reason,
       actorId: request.authorization?.actorId,
       sessionId: request.authorization?.sessionId,
       createdAt: new Date(now).toISOString(),
-      expiresAt: new Date(now + this.options.approvalTtlMs).toISOString(),
+      expiresAt: new Date(
+        now + this.options.approvalTtlMs,
+      ).toISOString(),
     };
 
-    this.pending.set(approvalRequest.id, {
-      request: approvalRequest,
-      fingerprint,
-    });
+    if (!this.approvalHandler) {
+      return {
+        decision: "require_approval",
+        reason,
+        approvalRequest,
+      };
+    }
+
+    const approval = await this.approvalHandler(
+      approvalRequest,
+    );
+
+    if (!approval.approved) {
+      return {
+        decision: "require_approval",
+        reason: approval.reason ?? reason,
+        approvalRequest,
+      };
+    }
 
     return {
-      decision: "require_approval",
-      reason: approvalRequest.reason,
+      decision: "allow",
+      reason: "Request approved.",
       approvalRequest,
     };
   }
 
-  approve(requestId: string): TerminalApprovalGrant {
-    this.cleanExpired();
-
-    const pending = this.pending.get(requestId);
-    if (!pending) {
-      throw new Error("Approval request is missing, expired, or already resolved.");
-    }
-
-    this.pending.delete(requestId);
-
-    const token = randomBytes(32).toString("hex");
-    const expiresAtMs = Date.now() + this.options.approvalTtlMs;
-    const expiresAt = new Date(expiresAtMs).toISOString();
-
-    this.grants.set(token, {
-      token,
-      fingerprint: pending.fingerprint,
-      expiresAtMs,
-    });
-
-    return { requestId, approvalToken: token, expiresAt };
-  }
-
-  reject(requestId: string): boolean {
-    return this.pending.delete(requestId);
-  }
-
-  getPendingRequest(requestId: string): TerminalApprovalRequest | undefined {
-    this.cleanExpired();
-    return this.pending.get(requestId)?.request;
-  }
-
-  private fingerprint(
-    request: TerminalRequest,
-    cwd: string,
-    shell: boolean | string,
-  ): string {
-    return JSON.stringify({
-      command: request.command.trim(),
-      args: request.args ?? [],
-      cwd,
-      shell,
-      actorId: request.authorization?.actorId ?? null,
-      sessionId: request.authorization?.sessionId ?? null,
-    });
-  }
-
-  private cleanExpired(): void {
-    const now = Date.now();
-
-    for (const [id, item] of this.pending) {
-      if (Date.parse(item.request.expiresAt) <= now) {
-        this.pending.delete(id);
-      }
-    }
-
-    for (const [token, grant] of this.grants) {
-      if (grant.expiresAtMs <= now) {
-        this.grants.delete(token);
-      }
-    }
-  }
-
-  private isWorkingDirectoryAllowed(cwd: string): boolean {
-    const roots = this.options.allowedWorkingDirectories;
-
-    if (roots.length === 0) {
-      return isAbsolute(cwd);
-    }
-
-    return roots.some((configuredRoot) => {
-      try {
-        const root = realpathSync(resolve(configuredRoot));
-        const target = realpathSync(cwd);
-        const rel = relative(root, target);
-
-        return (
-          rel === "" ||
-          (!rel.startsWith(`..${sep}`) &&
-            rel !== ".." &&
-            !isAbsolute(rel))
-        );
-      } catch {
-        return false;
-      }
-    });
+  private deny(
+    reason: string,
+  ): TerminalPolicyEvaluation {
+    return {
+      decision: "deny",
+      reason,
+    };
   }
 }
+

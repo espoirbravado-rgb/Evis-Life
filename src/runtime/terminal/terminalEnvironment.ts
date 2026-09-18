@@ -1,93 +1,155 @@
-import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+
+import fs from "node:fs";
+import path from "node:path";
+
 import type {
   TerminalEnvironment,
   TerminalEnvironmentOptions,
   TerminalExecutionContext,
 } from "./terminalTypes";
 
-const DEFAULT_BLOCKED_ENV_KEYS = [
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "GEMINI_API_KEY",
-  "GITHUB_TOKEN",
-  "GH_TOKEN",
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  "DATABASE_URL",
-  "NODE_OPTIONS",
-  "NODE_EXTRA_CA_CERTS",
-];
-
-const DEFAULT_ALLOWED_ENV_KEYS = [
-  "PATH",
-  "HOME",
-  "USER",
-  "LOGNAME",
-  "SHELL",
-  "LANG",
-  "LC_ALL",
-  "TERM",
-  "TMPDIR",
-  "TEMP",
-  "TMP",
-];
-
-export class DefaultTerminalEnvironment implements TerminalEnvironment {
+export class TerminalEnvironmentManager
+  implements TerminalEnvironment
+{
   private readonly options: Required<TerminalEnvironmentOptions>;
+  private readonly defaultCwd: string;
 
-  constructor(options: TerminalEnvironmentOptions = {}) {
+  constructor(
+    options: TerminalEnvironmentOptions = {},
+    defaultCwd: string = process.cwd(),
+  ) {
     this.options = {
       inheritProcessEnv: options.inheritProcessEnv ?? true,
-      blockedEnvKeys: options.blockedEnvKeys ?? DEFAULT_BLOCKED_ENV_KEYS,
-      allowedEnvKeys: options.allowedEnvKeys ?? DEFAULT_ALLOWED_ENV_KEYS,
+      blockedEnvKeys: options.blockedEnvKeys ?? [],
+      allowedEnvKeys: options.allowedEnvKeys ?? [],
     };
+
+    this.defaultCwd = path.resolve(defaultCwd);
   }
 
   resolve(
     requestedCwd?: string,
-    requestEnv: Record<string, string | undefined> = {},
+    requestEnv?: Record<string, string | undefined>,
   ): TerminalExecutionContext {
-    const requestedPath = resolve(requestedCwd ?? process.cwd());
+    const cwd = this.resolveCwd(requestedCwd);
+    const env = this.resolveEnv(requestEnv);
 
-    if (!isAbsolute(requestedPath)) {
-      throw new Error(`Terminal working directory must be absolute: ${requestedPath}`);
-    }
+    return {
+      cwd,
+      env,
+    };
+  }
 
-    let cwd: string;
+  private resolveCwd(requestedCwd?: string): string {
+    const candidate = path.resolve(
+      requestedCwd ?? this.defaultCwd,
+    );
+
+    let realPath: string;
 
     try {
-      cwd = realpathSync(requestedPath);
+      realPath = fs.realpathSync(candidate);
+    } catch (error) {
+      const code = this.getErrorCode(error);
+
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        throw new Error(
+          `Working directory does not exist: ${candidate}`,
+        );
+      }
+
+      if (code === "EACCES" || code === "EPERM") {
+        throw new Error(
+          `Permission denied for working directory: ${candidate}`,
+        );
+      }
+
+      throw new Error(
+        `Unable to resolve working directory: ${candidate}`,
+      );
+    }
+
+    let stats: fs.Stats;
+
+    try {
+      stats = fs.statSync(realPath);
     } catch {
-      throw new Error(`Terminal working directory does not exist: ${requestedPath}`);
+      throw new Error(
+        `Unable to inspect working directory: ${realPath}`,
+      );
     }
 
-    if (!statSync(cwd).isDirectory()) {
-      throw new Error(`Terminal working directory is not a directory: ${cwd}`);
+    if (!stats.isDirectory()) {
+      throw new Error(
+        `Working directory is not a directory: ${realPath}`,
+      );
     }
 
-    const env: NodeJS.ProcessEnv = {};
-    const allowed = new Set(this.options.allowedEnvKeys.map((key) => key.toUpperCase()));
-    const blocked = new Set(this.options.blockedEnvKeys.map((key) => key.toUpperCase()));
+    return realPath;
+  }
 
-    const canPass = (key: string) =>
-      !blocked.has(key.toUpperCase()) &&
-      allowed.has(key.toUpperCase());
+  private resolveEnv(
+    requestEnv?: Record<string, string | undefined>,
+  ): NodeJS.ProcessEnv {
+    const result: NodeJS.ProcessEnv = {};
+
+    const blocked = new Set(
+      this.options.blockedEnvKeys,
+    );
+
+    const allowed = this.options.allowedEnvKeys.length > 0
+      ? new Set(this.options.allowedEnvKeys)
+      : undefined;
+
+    const isAllowed = (key: string): boolean => {
+      if (blocked.has(key)) {
+        return false;
+      }
+
+      if (allowed && !allowed.has(key)) {
+        return false;
+      }
+
+      return true;
+    };
 
     if (this.options.inheritProcessEnv) {
       for (const [key, value] of Object.entries(process.env)) {
-        if (value !== undefined && canPass(key)) {
-          env[key] = value;
+        if (value !== undefined && isAllowed(key)) {
+          result[key] = value;
         }
       }
     }
 
-    for (const [key, value] of Object.entries(requestEnv)) {
-      if (value !== undefined && canPass(key)) {
-        env[key] = value;
+    if (requestEnv) {
+      for (const [key, value] of Object.entries(requestEnv)) {
+        if (!isAllowed(key)) {
+          continue;
+        }
+
+        if (value === undefined) {
+          delete result[key];
+          continue;
+        }
+
+        result[key] = value;
       }
     }
 
-    return { cwd, env };
+    return result;
+  }
+
+  private getErrorCode(error: unknown): string | undefined {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+    ) {
+      return error.code;
+    }
+
+    return undefined;
   }
 }
+

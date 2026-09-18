@@ -42,12 +42,21 @@ export interface TerminalAuthorizationContext {
   metadata?: Record<string, unknown>;
 }
 
+export interface TerminalApprovedExecutionContext {
+  env?: Record<string, string | undefined>;
+  stdin?: string;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+  executionMode?: TerminalExecutionMode;
+}
+
 export interface TerminalApprovalRequest {
   id: string;
   command: string;
   args: string[];
   cwd: string;
   shell: boolean | string;
+  execution: TerminalApprovedExecutionContext;
   reason: string;
   actorId?: string;
   sessionId?: string;

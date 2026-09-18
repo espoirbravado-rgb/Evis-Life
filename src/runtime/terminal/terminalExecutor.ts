@@ -1,22 +1,22 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
+
+import { spawn } from "node:child_process";
+
 import type {
   TerminalExecutionContext,
   TerminalExecutionResult,
   TerminalExecutor,
   TerminalExecutorOptions,
   TerminalRequest,
+  TerminalResultStatus,
 } from "./terminalTypes";
 
-const TERMINATION_GRACE_MS = 300;
-
-export class NodeTerminalExecutor implements TerminalExecutor {
+export class TerminalProcessExecutor implements TerminalExecutor {
   private readonly options: Required<TerminalExecutorOptions>;
 
   constructor(options: TerminalExecutorOptions = {}) {
     this.options = {
-      defaultTimeoutMs: options.defaultTimeoutMs ?? 120_000,
-      defaultMaxOutputBytes: options.defaultMaxOutputBytes ?? 1_048_576,
+      defaultTimeoutMs: options.defaultTimeoutMs ?? 30_000,
+      defaultMaxOutputBytes: options.defaultMaxOutputBytes ?? 1_000_000,
       killSignal: options.killSignal ?? "SIGTERM",
     };
   }
@@ -25,232 +25,279 @@ export class NodeTerminalExecutor implements TerminalExecutor {
     request: TerminalRequest,
     context: TerminalExecutionContext,
   ): Promise<TerminalExecutionResult> {
-    const command = request.command.trim();
-    const args = request.args ?? [];
-    const shell = request.shell ?? request.executionMode === "shell";
-    const timeoutMs = request.timeoutMs ?? this.options.defaultTimeoutMs;
-    const maxOutputBytes =
-      request.maxOutputBytes ?? this.options.defaultMaxOutputBytes;
-
-    if (!command) {
-      return Promise.resolve(this.immediateResult(
-        request, context.cwd, "execution_error", "Command cannot be empty.",
-      ));
-    }
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-      return Promise.resolve(this.immediateResult(
-        request, context.cwd, "execution_error", "Invalid timeoutMs.",
-      ));
-    }
-    if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
-      return Promise.resolve(this.immediateResult(
-        request, context.cwd, "execution_error", "Invalid maxOutputBytes.",
-      ));
-    }
-
-    const startedAt = new Date().toISOString();
-    const startedTime = Date.now();
-
     return new Promise((resolve) => {
+      const startedAt = new Date();
+      const startedTime = Date.now();
+
+      const command = request.command.trim();
+      const args = request.args ?? [];
+      const cwd = context.cwd;
+
+      const timeoutMs = Math.max(
+        1,
+        request.timeoutMs ?? this.options.defaultTimeoutMs,
+      );
+
+      const maxOutputBytes = Math.max(
+        0,
+        request.maxOutputBytes ?? this.options.defaultMaxOutputBytes,
+      );
+
+      const shell =
+        request.executionMode === "shell"
+          ? true
+          : request.shell ?? false;
+
       let stdout = "";
       let stderr = "";
       let outputBytes = 0;
-      let timedOut = false;
-      let cancelled = false;
       let truncated = false;
       let settled = false;
-      let terminationRequested = false;
-      let timer: NodeJS.Timeout | undefined;
-      let terminationTimer: NodeJS.Timeout | undefined;
-      let pendingClose:
-        | { exitCode: number | null; signal: NodeJS.Signals | null }
-        | undefined;
-      const stdoutDecoder = new StringDecoder("utf8");
-      const stderrDecoder = new StringDecoder("utf8");
-      let child: ChildProcess | undefined;
+      let timedOut = false;
+      let cancelled = false;
+      let childPid: number | undefined;
+
+      let timeout: NodeJS.Timeout | undefined;
 
       const finish = (
-        status: TerminalExecutionResult["status"],
+        status: TerminalResultStatus,
         exitCode: number | null,
         signal: string | null,
-        error?: { code?: string; message?: string },
+        errorCode?: string,
+        errorMessage?: string,
       ) => {
         if (settled) return;
         settled = true;
-        if (timer) clearTimeout(timer);
-        if (terminationTimer) clearTimeout(terminationTimer);
-        request.signal?.removeEventListener("abort", onAbort);
-        stdout += stdoutDecoder.end();
-        stderr += stderrDecoder.end();
+
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+
+        request.signal?.removeEventListener(
+          "abort",
+          onAbort,
+        );
+
         resolve({
-          status, exitCode, signal, stdout, stderr, command, args,
-          cwd: context.cwd, startedAt,
+          status,
+          exitCode,
+          signal,
+          stdout,
+          stderr,
+          command,
+          args: [...args],
+          cwd,
+          startedAt: startedAt.toISOString(),
           finishedAt: new Date().toISOString(),
           durationMs: Date.now() - startedTime,
-          pid: child?.pid, errorCode: error?.code,
-          errorMessage: error?.message, truncated,
+          pid: childPid,
+          errorCode,
+          errorMessage,
+          truncated,
         });
       };
 
-      const signalProcessTree = (signal: NodeJS.Signals) => {
-        if (!child?.pid) return;
-        if (process.platform !== "win32") {
-          try {
-            process.kill(-child.pid, signal);
-            return;
-          } catch {
-            // Group may have exited; try the leader directly.
-          }
+      const appendOutput = (
+        chunk: Buffer,
+        stream: "stdout" | "stderr",
+      ) => {
+        const remaining = maxOutputBytes - outputBytes;
+
+        if (remaining <= 0) {
+          truncated = true;
+          return;
         }
-        try {
-          child.kill(signal);
-        } catch {
-          // close/error handling will report the outcome.
+
+        const accepted = chunk.subarray(
+          0,
+          Math.min(chunk.length, remaining),
+        );
+
+        outputBytes += accepted.length;
+
+        const text = accepted.toString("utf8");
+
+        if (stream === "stdout") {
+          stdout += text;
+        } else {
+          stderr += text;
+        }
+
+        if (accepted.length < chunk.length) {
+          truncated = true;
         }
       };
 
-      const terminate = () => {
-        if (!child?.pid || settled || terminationRequested) return;
-        terminationRequested = true;
-        signalProcessTree(this.options.killSignal);
+      const killChild = () => {
+        if (!child || child.killed) return;
 
-        if (process.platform !== "win32") {
-          terminationTimer = setTimeout(() => {
-            signalProcessTree("SIGKILL");
-            if (pendingClose) {
-              finish(
-                timedOut ? "timeout" : cancelled ? "cancelled" : "output_limit",
-                pendingClose.exitCode,
-                pendingClose.signal,
-              );
-            }
-          }, TERMINATION_GRACE_MS);
+        try {
+          child.kill(this.options.killSignal);
+        } catch {
+          // The process may already have exited.
         }
       };
 
       const onAbort = () => {
         if (settled) return;
+
         cancelled = true;
-        terminate();
-      };
+        killChild();
 
-      const collectOutput = (chunk: Buffer, target: "stdout" | "stderr") => {
-        if (settled) return;
-        const remaining = maxOutputBytes - outputBytes;
-        if (remaining <= 0) {
-          truncated = true;
-          terminate();
-          return;
-        }
-        const accepted = chunk.subarray(0, remaining);
-        outputBytes += accepted.byteLength;
-        if (target === "stdout") stdout += stdoutDecoder.write(accepted);
-        else stderr += stderrDecoder.write(accepted);
-        if (chunk.byteLength > remaining) {
-          truncated = true;
-          terminate();
-        }
-      };
-
-      try {
-        child = spawn(command, args, {
-          cwd: context.cwd,
-          env: context.env,
-          shell,
-          detached: process.platform !== "win32",
-          stdio: ["pipe", "pipe", "pipe"],
-          windowsHide: true,
-        });
-      } catch (error) {
-        const err = error as NodeJS.ErrnoException;
         finish(
-          err.code === "EACCES" ? "permission_denied" : "execution_error",
-          null, null, { code: err.code, message: err.message },
+          "cancelled",
+          null,
+          null,
+          "ABORT_ERR",
+          "Execution was cancelled.",
+        );
+      };
+
+      if (request.signal?.aborted) {
+        finish(
+          "cancelled",
+          null,
+          null,
+          "ABORT_ERR",
+          "Execution was cancelled before it started.",
         );
         return;
       }
 
-      child.stdout?.on("data", (chunk: Buffer) => collectOutput(chunk, "stdout"));
-      child.stderr?.on("data", (chunk: Buffer) => collectOutput(chunk, "stderr"));
+      let child: ReturnType<typeof spawn>;
+
+      try {
+        child = spawn(command, args, {
+          cwd,
+          env: context.env,
+          shell,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        });
+
+        childPid = child.pid;
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        finish(
+          "execution_error",
+          null,
+          null,
+          "SPAWN_ERROR",
+          message,
+        );
+
+        return;
+      }
+
+      request.signal?.addEventListener(
+        "abort",
+        onAbort,
+        { once: true },
+      );
+
+      timeout = setTimeout(() => {
+        if (settled) return;
+
+        timedOut = true;
+        killChild();
+
+        finish(
+          "timeout",
+          null,
+          null,
+          "ETIMEDOUT",
+          `Execution exceeded ${timeoutMs} ms.`,
+        );
+      }, timeoutMs);
+
+      child.stdout?.on("data", (chunk: Buffer) => {
+        appendOutput(chunk, "stdout");
+      });
+
+      child.stderr?.on("data", (chunk: Buffer) => {
+        appendOutput(chunk, "stderr");
+      });
 
       child.on("error", (error: NodeJS.ErrnoException) => {
-        // A kill-related error must not cancel a pending process-tree escalation.
-        if (terminationRequested) return;
+        if (settled) return;
+
         if (error.code === "ENOENT") {
-          finish("command_not_found", null, null, {
-            code: error.code, message: error.message,
-          });
+          finish(
+            "command_not_found",
+            null,
+            null,
+            error.code,
+            error.message,
+          );
           return;
         }
-        if (error.code === "EACCES") {
-          finish("permission_denied", null, null, {
-            code: error.code, message: error.message,
-          });
+
+        if (error.code === "EACCES" || error.code === "EPERM") {
+          finish(
+            "permission_denied",
+            null,
+            null,
+            error.code,
+            error.message,
+          );
           return;
         }
-        if (error.name === "AbortError" || cancelled) {
-          finish("cancelled", null, null, {
-            code: error.code, message: error.message,
-          });
-          return;
-        }
-        finish("execution_error", null, null, {
-          code: error.code, message: error.message,
-        });
+
+        finish(
+          "execution_error",
+          null,
+          null,
+          error.code,
+          error.message,
+        );
       });
 
       child.on("close", (exitCode, signal) => {
-        if (terminationRequested && process.platform !== "win32") {
-          pendingClose = { exitCode, signal };
-          return;
-        }
-        if (timedOut) {
-          finish("timeout", exitCode, signal);
-          return;
-        }
+        if (settled) return;
+
         if (cancelled) {
           finish("cancelled", exitCode, signal);
           return;
         }
-        if (truncated) {
-          finish("output_limit", exitCode, signal);
+
+        if (timedOut) {
+          finish("timeout", exitCode, signal);
           return;
         }
+
+        if (truncated) {
+          finish(
+            "output_limit",
+            exitCode,
+            signal,
+            "OUTPUT_LIMIT",
+            "Process output exceeded the configured byte limit.",
+          );
+          return;
+        }
+
+        if (exitCode === 0) {
+          finish("success", exitCode, signal);
+          return;
+        }
+
         finish(
-          exitCode === 0 ? "success" : "non_zero_exit",
-          exitCode, signal,
+          "non_zero_exit",
+          exitCode,
+          signal,
         );
       });
 
-      if (request.stdin !== undefined && child.stdin) child.stdin.end(request.stdin);
-      else child.stdin?.end();
-
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => {
-          if (settled) return;
-          timedOut = true;
-          terminate();
-        }, timeoutMs);
-      }
-
-      if (request.signal) {
-        if (request.signal.aborted) onAbort();
-        else request.signal.addEventListener("abort", onAbort, { once: true });
+      if (request.stdin !== undefined) {
+        child.stdin?.end(request.stdin);
+      } else {
+        child.stdin?.end();
       }
     });
   }
-
-  private immediateResult(
-    request: TerminalRequest,
-    cwd: string,
-    status: TerminalExecutionResult["status"],
-    errorMessage: string,
-  ): TerminalExecutionResult {
-    const now = new Date().toISOString();
-    return {
-      status, exitCode: null, signal: null, stdout: "", stderr: "",
-      command: request.command, args: request.args ?? [], cwd,
-      startedAt: now, finishedAt: now, durationMs: 0, errorMessage,
-    };
-  }
 }
+
