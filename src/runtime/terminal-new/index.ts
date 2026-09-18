@@ -32,6 +32,7 @@ export * from './sandbox/sandboxTypes.ts';
 export * from './checkpoint/snapshotManager.ts';
 export * from './checkpoint/rollbackEngine.ts';
 export * from './checkpoint/gitStashAdapter.ts';
+export * from './checkpoint/checkpointTypes.ts';
 
 export * from './streaming/terminalEvents.ts';
 export * from './streaming/outputBuffer.ts';

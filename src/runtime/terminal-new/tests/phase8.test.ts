@@ -13,30 +13,12 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { LocalDriver, BubblewrapDriver, SandboxManager } from '../sandbox/sandboxManager.ts';
 import { SandboxPolicy } from '../sandbox/sandboxPolicy.ts';
 
 const execFileAsync = promisify(execFile);
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────────────────────
-
-/**
- * We probe real bwrap availability (binary + namespace support) once at module load.
- * Using checkCapabilities() ensures we skip bwrap tests when namespaces are not
- * supported by the kernel (e.g. in containers without user namespace support).
- */
-let BWRAP_AVAILABLE = false;
-let BWRAP_UNAVAILABLE_REASON = '';
-
-{
-  // Synchronous probe via binary existence only (async probe done in describe block)
-  BWRAP_AVAILABLE = existsSync('/bin/bwrap');
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 1. LocalDriver
@@ -109,56 +91,58 @@ describe('LocalDriver — No Isolation', () => {
 // ──────────────────────────────────────────────────────────────────────────────
 
 describe('BubblewrapDriver — Capabilities Probe', () => {
-  it('reports the correct isolation level', async () => {
+  it('reports the correct isolation level always (regardless of availability)', async () => {
     const driver = new BubblewrapDriver();
     const caps = await driver.checkCapabilities();
     assert.equal(caps.isolationLevel, 'bubblewrap');
   });
 
-  it('reports available: true only if /bin/bwrap exists and can run', async () => {
+  it('provides unavailableReason when bwrap namespace probe fails', async () => {
     const driver = new BubblewrapDriver();
     const caps = await driver.checkCapabilities();
-    assert.equal(caps.available, BWRAP_AVAILABLE,
-      BWRAP_AVAILABLE
-        ? 'bwrap is present, driver must report available: true'
-        : 'bwrap is absent, driver must report available: false');
-  });
-
-  it('provides unavailableReason when bwrap is not available', async () => {
-    if (BWRAP_AVAILABLE) {
-      // If bwrap IS available, this test is not applicable — skip gracefully.
-      return;
+    if (caps.available) {
+      // Bwrap fully works — no reason needed.
+      assert.equal(caps.unavailableReason, undefined);
+    } else {
+      // Not available: must explain why.
+      assert.ok(
+        typeof caps.unavailableReason === 'string' && caps.unavailableReason.length > 0,
+        `unavailableReason must be set when available=false, got: ${caps.unavailableReason}`
+      );
     }
-    const driver = new BubblewrapDriver();
-    const caps = await driver.checkCapabilities();
-    assert.equal(caps.available, false);
-    assert.ok(
-      typeof caps.unavailableReason === 'string' && caps.unavailableReason.length > 0,
-      'unavailableReason must explain why bwrap is not available'
-    );
   });
 
-  it('wrapCommand includes --unshare-net when network is not allowed', async () => {
-    if (!BWRAP_AVAILABLE) return;
-
+  it('wrapCommand generates correct args — does not need namespace support', () => {
+    // wrapCommand() is a pure arg-generation function — it does NOT require
+    // initialize() or namespace support. We test arg structure independently.
     const driver = new BubblewrapDriver();
-    await driver.initialize();
+    const policy = SandboxPolicy.strict('/tmp').config;
+    const result = driver.wrapCommand('echo', ['sandbox_works'], '/tmp', policy, {
+      PATH: '/bin',
+      HOME: '/root',
+      TERM: 'xterm',
+      SHELL: '/bin/sh',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8',
+    });
 
+    assert.equal(result.command, '/bin/bwrap', 'Command must be the bwrap binary');
+    assert.equal(result.isolated, true, 'BubblewrapDriver must always report isolated: true');
+    assert.equal(result.driverName, 'bubblewrap');
+    assert.ok(Array.isArray(result.args), 'args must be an array');
+  });
+
+  it('wrapCommand includes --unshare-net when network is not allowed', () => {
+    const driver = new BubblewrapDriver();
     const policy = SandboxPolicy.strict('/tmp').config;
     const result = driver.wrapCommand('echo', [], '/tmp', policy, { PATH: '/bin' });
 
     assert.ok(result.args.includes('--unshare-net'),
       '--unshare-net must be present when network is denied');
-    assert.equal(result.isolated, true);
-    assert.equal(result.driverName, 'bubblewrap');
   });
 
-  it('wrapCommand does NOT include --unshare-net when network is allowed', async () => {
-    if (!BWRAP_AVAILABLE) return;
-
+  it('wrapCommand does NOT include --unshare-net when network is allowed', () => {
     const driver = new BubblewrapDriver();
-    await driver.initialize();
-
     const policy = SandboxPolicy.permissive('/tmp').config;
     const result = driver.wrapCommand('echo', [], '/tmp', policy, { PATH: '/bin' });
 
@@ -166,12 +150,8 @@ describe('BubblewrapDriver — Capabilities Probe', () => {
       '--unshare-net must NOT be present when network is allowed');
   });
 
-  it('wrapCommand always includes --unshare-pid and --die-with-parent', async () => {
-    if (!BWRAP_AVAILABLE) return;
-
+  it('wrapCommand always includes --unshare-pid and --die-with-parent', () => {
     const driver = new BubblewrapDriver();
-    await driver.initialize();
-
     const policy = SandboxPolicy.strict('/tmp').config;
     const result = driver.wrapCommand('echo', [], '/tmp', policy, { PATH: '/bin' });
 
@@ -179,17 +159,17 @@ describe('BubblewrapDriver — Capabilities Probe', () => {
     assert.ok(result.args.includes('--die-with-parent'), '--die-with-parent must always be present');
   });
 
-  it('wrapCommand uses --clearenv and --setenv for environment control', async () => {
-    if (!BWRAP_AVAILABLE) return;
-
+  it('wrapCommand uses --clearenv and --setenv for environment control', () => {
     const driver = new BubblewrapDriver();
-    await driver.initialize();
-
     const policy = SandboxPolicy.strict('/tmp').config;
     const result = driver.wrapCommand('env', [], '/tmp', policy, {
       PATH: '/bin',
-      AWS_SECRET: 'shouldnotappear',
       HOME: '/root',
+      TERM: 'xterm',
+      SHELL: '/bin/sh',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8',
+      AWS_SECRET: 'shouldnotappear',
     });
 
     assert.ok(result.args.includes('--clearenv'), '--clearenv must be present');
@@ -222,31 +202,24 @@ describe('SandboxManager — Driver Selection & Initialization', () => {
     await manager.cleanup();
   });
 
-  it('selects BubblewrapDriver when policy requests bubblewrap and bwrap is available', async () => {
-    if (!BWRAP_AVAILABLE) return;
-
+  it('reports honest result when bubblewrap is requested — either selects it or warns', async () => {
+    // This test is environment-agnostic: whether bwrap works or not,
+    // the manager must be transparent about what actually happened.
     const manager = new SandboxManager(SandboxPolicy.strict('/tmp'));
     const result = await manager.initialize();
-    assert.equal(result.driver, 'bubblewrap');
-    assert.equal(result.isolated, true);
-    assert.equal(result.warning, undefined, 'No warning expected when bwrap is available');
-    await manager.cleanup();
-  });
 
-  it('falls back to LocalDriver with a clear warning when bubblewrap is unavailable', async () => {
-    // Simulate unavailability by injecting a mock driver.
-    const manager = new SandboxManager(SandboxPolicy.strict('/tmp'));
-
-    // Bypass real initialization, inject local driver directly.
-    const localDriver = new LocalDriver();
-    await localDriver.initialize();
-    manager.setDriver(localDriver);
-
-    // Directly test warning scenario via a custom manager subclass is complex,
-    // so we test that the local driver IS available and honest.
-    const caps = await manager.getCapabilities();
-    // After setDriver we have LocalDriver
-    assert.equal(caps.available, true);
+    if (result.driver === 'bubblewrap') {
+      assert.equal(result.isolated, true, 'bubblewrap driver must report isolated: true');
+      assert.equal(result.warning, undefined, 'No warning when bwrap works');
+    } else {
+      // Fell back to local — must have a warning explaining why.
+      assert.equal(result.driver, 'local');
+      assert.equal(result.isolated, false);
+      assert.ok(
+        typeof result.warning === 'string' && result.warning.length > 0,
+        `SandboxManager must emit a warning when falling back to local, got: ${result.warning}`
+      );
+    }
     await manager.cleanup();
   });
 
@@ -257,6 +230,18 @@ describe('SandboxManager — Driver Selection & Initialization', () => {
       /initialize\(\)/,
       'Must throw with a message mentioning initialize()'
     );
+  });
+
+  it('wrapCommand after initialize() returns a valid CommandWrapResult', async () => {
+    const manager = new SandboxManager(SandboxPolicy.none());
+    await manager.initialize();
+    const result = manager.wrapCommand('echo hello', '/tmp', { PATH: '/bin' });
+
+    assert.equal(typeof result.command, 'string');
+    assert.ok(result.command.length > 0);
+    assert.equal(typeof result.isolated, 'boolean');
+    assert.equal(typeof result.driverName, 'string');
+    await manager.cleanup();
   });
 });
 
@@ -307,18 +292,31 @@ describe('SandboxPolicy — Presets & Validation', () => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 5. Real Execution Test (bwrap required)
+// 5. Real Execution Test (requires kernel namespace support)
 // ──────────────────────────────────────────────────────────────────────────────
 
 describe('BubblewrapDriver — Real Isolation Verification', () => {
-  it('sandboxed echo command executes successfully and returns output', async () => {
-    if (!BWRAP_AVAILABLE) return;
-
+  it('sandboxed echo command executes successfully when bwrap is fully available', async () => {
+    // Use real capability probe — binary existence alone is not sufficient.
     const driver = new BubblewrapDriver();
+    const caps = await driver.checkCapabilities();
+    if (!caps.available) {
+      // Skip: kernel does not support user namespaces in this environment.
+      // This is expected in containers without unprivileged namespace support.
+      return;
+    }
+
     await driver.initialize();
 
     const policy = SandboxPolicy.strict('/tmp').config;
-    const hostEnv = { PATH: '/usr/bin:/bin', HOME: '/root', TERM: 'xterm' };
+    const hostEnv = {
+      PATH: '/usr/bin:/bin',
+      HOME: '/root',
+      TERM: 'xterm',
+      SHELL: '/bin/sh',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8',
+    };
 
     const result = driver.wrapCommand('echo', ['sandbox_works'], '/tmp', policy, hostEnv);
 
@@ -335,10 +333,11 @@ describe('BubblewrapDriver — Real Isolation Verification', () => {
       `Expected "sandbox_works" in stdout, got: ${stdout}`);
   });
 
-  it('sandboxed command cannot see host-only env variables', async () => {
-    if (!BWRAP_AVAILABLE) return;
-
+  it('sandboxed command cannot see host-only env variables when bwrap is available', async () => {
     const driver = new BubblewrapDriver();
+    const caps = await driver.checkCapabilities();
+    if (!caps.available) return;
+
     await driver.initialize();
 
     const policy = SandboxPolicy.strict('/tmp').config;
@@ -354,7 +353,7 @@ describe('BubblewrapDriver — Real Isolation Verification', () => {
 
     // Command that prints HOST_SECRET if present, or "HIDDEN" if not.
     const result = driver.wrapCommand(
-      'sh -c \'echo ${HOST_SECRET:-HIDDEN}\'',
+      "sh -c 'echo ${HOST_SECRET:-HIDDEN}'",
       [],
       '/tmp',
       policy,

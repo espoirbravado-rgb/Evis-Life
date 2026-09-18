@@ -1,5 +1,6 @@
 
 import { FilesystemTool } from '../execution/implementations/filesystemTool';
+import { TerminalTool } from '../execution/implementations/terminalTool';
 import {
   IToolImplementation,
   ToolExecutor,
@@ -12,6 +13,7 @@ export class RuntimeComposition {
   constructor() {
     this.implementations = [
       new FilesystemTool(),
+      new TerminalTool(),
     ];
 
     this.toolExecutor = new ToolExecutor({

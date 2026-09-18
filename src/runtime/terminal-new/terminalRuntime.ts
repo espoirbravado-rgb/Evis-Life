@@ -88,6 +88,9 @@ export class TerminalRuntime {
     const session = this.sessionManager.getOrCreateSession(options.sessionId, options.cwd);
     const cwd = options.cwd ?? session.cwd;
     const context = { sessionId: session.id, taskId: options.taskId };
+    if (!this.sandboxManager.isInitialized()) {
+      await this.sandboxManager.initialize();
+    }
 
     // 1. Central Policy & Permission Evaluation
     const decision = this.policy.evaluate(command, options);
@@ -372,6 +375,9 @@ export class TerminalRuntime {
     const session = this.sessionManager.getOrCreateSession(options.sessionId, options.cwd);
     const cwd = options.cwd ?? session.cwd;
     const context = { sessionId: session.id, taskId: options.taskId };
+    if (!this.sandboxManager.isInitialized()) {
+      await this.sandboxManager.initialize();
+    }
 
     // 1. Policy & permission check for background execution
     const optsWithBackground: CommandExecutionOptions = { ...options, background: true };

@@ -19,6 +19,10 @@ export class SessionManager {
     return session;
   }
 
+  public hasSession(id: SessionId): boolean {
+    return this.sessions.has(id);
+  }
+
   public getSession(id?: SessionId): TerminalSession | undefined {
     if (!id) {
       return this.sessions.get(this.defaultSessionId);
