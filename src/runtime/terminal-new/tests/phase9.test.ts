@@ -194,5 +194,42 @@ describe('Terminal-New Phase 9 (Checkpoints & Rollback Engine)', () => {
       const result = await RollbackEngine.rollback(snapshot.id, manager);
       assert.equal(result.status, 'not_supported');
     });
+
+    it('ensures two checkpoints do not interfere: checkpoint A -> changes A -> checkpoint B -> changes B -> rollback A', async () => {
+      const manager = new SnapshotManager();
+      const concDir = path.join(testRootDir, 'concurrency_dir');
+      fs.mkdirSync(concDir, { recursive: true });
+
+      // State A: initial file
+      const file = path.join(concDir, 'state.txt');
+      fs.writeFileSync(file, 'state_A');
+      const snapA = await manager.createSnapshot(concDir, { description: 'Checkpoint A' });
+
+      // Changes A: modify state.txt, add file_A.txt
+      fs.writeFileSync(file, 'state_after_A');
+      fs.writeFileSync(path.join(concDir, 'file_A.txt'), 'data_A');
+
+      // Checkpoint B
+      const snapB = await manager.createSnapshot(concDir, { description: 'Checkpoint B' });
+      assert.ok(snapB.id);
+
+      // Changes B: modify state.txt, add file_B.txt
+      fs.writeFileSync(file, 'state_after_B');
+      fs.writeFileSync(path.join(concDir, 'file_B.txt'), 'data_B');
+
+      // Verify state before rollback
+      assert.equal(fs.readFileSync(file, 'utf-8'), 'state_after_B');
+      assert.equal(fs.existsSync(path.join(concDir, 'file_A.txt')), true);
+      assert.equal(fs.existsSync(path.join(concDir, 'file_B.txt')), true);
+
+      // Rollback to Checkpoint A
+      const rollbackResult = await RollbackEngine.rollback(snapA.id, manager);
+      assert.equal(rollbackResult.status, 'success');
+
+      // State must be exactly State A
+      assert.equal(fs.readFileSync(file, 'utf-8'), 'state_A');
+      assert.equal(fs.existsSync(path.join(concDir, 'file_A.txt')), false, 'file_A must be removed by rollback to A');
+      assert.equal(fs.existsSync(path.join(concDir, 'file_B.txt')), false, 'file_B must be removed by rollback to A');
+    });
   });
 });

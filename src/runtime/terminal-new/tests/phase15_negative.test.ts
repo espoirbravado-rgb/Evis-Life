@@ -176,6 +176,23 @@ describe('Terminal-New Phase 15 (Mandatory Negative Tests)', () => {
       assert.equal(result.status, 'failed');
       assert.match(result.stderr, /ENOENT|no such file or directory|does not exist/i);
     });
+
+    it('rejects execution truthfully when sandbox is required but unavailable (sandbox unavailable)', async () => {
+      const runtime = new TerminalRuntime();
+      // Ensure LocalDriver is active (isolationLevel: 'none')
+      const initialActive = runtime.processManager.listActive().length;
+
+      const result = await runtime.execute('echo "should not run"', {
+        sandbox: { required: true, driver: 'bubblewrap' }
+      });
+
+      assert.equal(result.status, 'failed');
+      assert.equal(result.exitCode, 1);
+      assert.match(result.stderr, /sandbox unavailable/i);
+      assert.equal(result.processId, undefined);
+      assert.equal(runtime.processManager.listActive().length, initialActive, 'Must spawn zero OS processes');
+      assert.ok(runtime.metrics.getMetrics().sandboxFailures >= 1, 'Must record sandbox failure metric');
+    });
   });
 
   describe('Timeout and Cancellation Guarantees', () => {

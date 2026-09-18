@@ -114,8 +114,28 @@ export class TerminalRuntime {
       return result;
     }
 
-    // 2. Built-in Session State Commands (cd & export)
+    // 2. Built-in Session State Commands (cd, export, alias)
+    //
+    // DESIGN NOTE — Metadata-only session state (no persistent shell process):
+    // TerminalRuntime does NOT maintain a single long-lived shell process across
+    // calls.  Each `execute()` call spawns a fresh OS process.  State continuity
+    // (current directory, environment variables, aliases) is preserved by
+    // mutating the `TerminalSession` metadata object and injecting that state
+    // into every new spawn via `buildEnvironment()` and `--cwd`.
+    //
+    // Consequence: `cd` and `export` never touch a real shell; they only update
+    // `session._cwd` / `session._env` / `session._aliases`.  This means:
+    //   • Interactive shell features that depend on a persistent process (e.g.,
+    //     functions defined with `f() { … }`, `trap`, `set -o`) are not carried
+    //     across commands.
+    //   • Commands that rely on process-group membership of a single shell may
+    //     behave differently from a real interactive terminal.
+    //
+    // This is intentional.  The trade-off favours stateless, sandboxable
+    // per-command isolation over full shell emulation.  For real interactive
+    // sessions with a persistent shell, use `spawnPty()` instead.
     const trimmedCmd = command.trim();
+
 
     // Check for 'cd'
     const cdMatch = this.checkCdCommand(trimmedCmd);
@@ -185,9 +205,81 @@ export class TerminalRuntime {
       return result;
     }
 
+    // Check for 'alias' command
+    const aliasMatch = this.checkAliasCommand(trimmedCmd);
+    if (aliasMatch.isAlias) {
+      if (aliasMatch.name && aliasMatch.value !== undefined) {
+        session.setAlias(aliasMatch.name, aliasMatch.value);
+        const result: CommandResult = {
+          command,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          durationMs: Date.now() - startTime,
+          status: 'completed',
+          timedOut: false,
+          truncated: false,
+          sessionId: session.id,
+          taskId: options.taskId
+        };
+        session.addHistory({ command, exitCode: 0, timestamp: Date.now(), durationMs: result.durationMs });
+        this.audit.logExecution(result, session.cwd);
+        this.metrics.recordCommand(result.durationMs, true);
+        return result;
+      } else {
+        const aliases = session.getAliases();
+        const stdout = Object.entries(aliases).map(([k, v]) => `alias ${k}='${v}'`).join('\n') + (Object.keys(aliases).length > 0 ? '\n' : '');
+        const result: CommandResult = {
+          command,
+          exitCode: 0,
+          stdout,
+          stderr: '',
+          durationMs: Date.now() - startTime,
+          status: 'completed',
+          timedOut: false,
+          truncated: false,
+          sessionId: session.id,
+          taskId: options.taskId
+        };
+        session.addHistory({ command, exitCode: 0, timestamp: Date.now(), durationMs: result.durationMs });
+        this.audit.logExecution(result, session.cwd);
+        this.metrics.recordCommand(result.durationMs, true);
+        return result;
+      }
+    }
+
+    // Expand session alias if applicable
+    let cmdToRun = authResult.modifiedCommand ?? command;
+    const firstWord = cmdToRun.trim().split(/\s+/)[0];
+    const aliasExpansion = session.getAlias(firstWord);
+    if (aliasExpansion) {
+      cmdToRun = aliasExpansion + cmdToRun.trim().substring(firstWord.length);
+    }
+
+    // Check sandbox requirements (Section 8.4)
+    const sandboxRequired = options.sandbox?.required || options.sandbox?.driver === 'bubblewrap';
+    if (sandboxRequired && this.sandboxManager.getDriver().isolationLevel === 'none') {
+      this.metrics.recordSandboxFailure();
+      const result: CommandResult = {
+        command,
+        exitCode: 1,
+        stdout: '',
+        stderr: 'sandbox unavailable: bubblewrap isolation is required but unavailable on this host',
+        durationMs: Date.now() - startTime,
+        status: 'failed',
+        timedOut: false,
+        truncated: false,
+        sessionId: session.id,
+        taskId: options.taskId,
+        agentId: options.agentId
+      };
+      this.audit.logExecution(result, cwd);
+      this.metrics.recordCommand(result.durationMs, false);
+      return result;
+    }
+
     // 3. Wrap command with sandbox isolation if driver is active
-    const effectiveCommand = authResult.modifiedCommand ?? command;
-    const wrapResult = this.sandboxManager.wrapCommand(effectiveCommand, cwd);
+    const wrapResult = this.sandboxManager.wrapCommand(cmdToRun, cwd);
     const wrappedCommand = wrapResult.command;
 
     // 4. Environment building (hermetic & filtered)
@@ -211,8 +303,9 @@ export class TerminalRuntime {
     return new Promise<CommandResult>((resolve) => {
       let timer: NodeJS.Timeout | null = null;
 
-      this.events.emitProcessCreated(wrappedCommand, cwd, context);
+      this.events.emitProcessCreated(SecretRedactor.redact(wrappedCommand), cwd, context);
 
+      const shellToUse = options.shell ?? session.shell ?? '/bin/bash';
       const handle = this.processManager.spawn({
         command: wrappedCommand,
         cwd,
@@ -220,7 +313,7 @@ export class TerminalRuntime {
         sessionId: session.id,
         taskId: options.taskId,
         detached: true,
-        shell: '/bin/bash'
+        shell: shellToUse
       });
 
       // Attach process to session
@@ -266,14 +359,14 @@ export class TerminalRuntime {
       handle.child.stdout?.on('data', (chunk: Buffer) => {
         const text = chunk.toString('utf-8');
         stdoutBuffer.append(text);
-        this.events.emitStdout(text, { ...context, processId: handle.pid });
+        this.events.emitStdout(SecretRedactor.redact(text), { ...context, processId: handle.pid });
         checkPrompt(text);
       });
 
       handle.child.stderr?.on('data', (chunk: Buffer) => {
         const text = chunk.toString('utf-8');
         stderrBuffer.append(text);
-        this.events.emitStderr(text, { ...context, processId: handle.pid });
+        this.events.emitStderr(SecretRedactor.redact(text), { ...context, processId: handle.pid });
         checkPrompt(text);
       });
 
@@ -355,8 +448,8 @@ export class TerminalRuntime {
         const result: CommandResult = {
           command,
           exitCode: 1,
-          stdout: stdoutBuffer.toString(),
-          stderr: err.message,
+          stdout: SecretRedactor.redact(stdoutBuffer.toString()),
+          stderr: SecretRedactor.redact(err.message),
           durationMs,
           status: 'failed',
           timedOut: false,
@@ -370,7 +463,7 @@ export class TerminalRuntime {
         this.metrics.setActiveProcesses(this.processManager.getActiveProcessCount());
         this.audit.logExecution(result, cwd);
         this.metrics.recordCommand({ durationMs, status: 'failed', timedOut: false });
-        this.events.emitProcessFailed(err.message, durationMs, { ...context, processId: handle.pid });
+        this.events.emitProcessFailed(SecretRedactor.redact(err.message), durationMs, { ...context, processId: handle.pid });
 
         resolve(result);
       });
@@ -397,6 +490,13 @@ export class TerminalRuntime {
       throw new Error(`Background execution blocked: ${bgAuthResult.reason ?? 'Approval required but not granted.'}`);
     }
 
+    // Check sandbox requirements (Section 8.4)
+    const sandboxRequired = options.sandbox?.required || options.sandbox?.driver === 'bubblewrap';
+    if (sandboxRequired && this.sandboxManager.getDriver().isolationLevel === 'none') {
+      this.metrics.recordSandboxFailure();
+      throw new Error('sandbox unavailable: bubblewrap isolation is required but unavailable on this host');
+    }
+
     // 2. Prepare environment & wrap command
     const effectiveCommand = bgAuthResult.modifiedCommand ?? command;
     const wrapResult2 = this.sandboxManager.wrapCommand(effectiveCommand, cwd);
@@ -409,8 +509,9 @@ export class TerminalRuntime {
     });
     const env = wrapResult2.isolated ? wrapResult2.env : { ...baseBuilt2, ...wrapResult2.env };
 
-    this.events.emitProcessCreated(wrappedCommand2, cwd, context);
+    this.events.emitProcessCreated(SecretRedactor.redact(wrappedCommand2), cwd, context);
 
+    const shellToUse = options.shell ?? session.shell ?? '/bin/bash';
     const handle = this.processManager.spawn({
       command: wrappedCommand2,
       cwd,
@@ -418,7 +519,7 @@ export class TerminalRuntime {
       sessionId: session.id,
       taskId: options.taskId,
       detached: true,
-      shell: '/bin/bash'
+      shell: shellToUse
     });
 
     session.attachProcess(handle.id);
@@ -435,11 +536,11 @@ export class TerminalRuntime {
     }
 
     handle.child.stdout?.on('data', (chunk: Buffer) => {
-      this.events.emitStdout(chunk.toString('utf-8'), { ...context, processId: handle.pid });
+      this.events.emitStdout(SecretRedactor.redact(chunk.toString('utf-8')), { ...context, processId: handle.pid });
     });
 
     handle.child.stderr?.on('data', (chunk: Buffer) => {
-      this.events.emitStderr(chunk.toString('utf-8'), { ...context, processId: handle.pid });
+      this.events.emitStderr(SecretRedactor.redact(chunk.toString('utf-8')), { ...context, processId: handle.pid });
     });
 
     handle.child.once('close', (code, signal) => {
@@ -451,7 +552,7 @@ export class TerminalRuntime {
     handle.child.once('error', (err) => {
       session.detachProcess(handle.id);
       this.metrics.setActiveProcesses(this.processManager.getActiveProcessCount());
-      this.events.emitProcessFailed(err.message, handle.durationMs, { ...context, processId: handle.pid });
+      this.events.emitProcessFailed(SecretRedactor.redact(err.message), handle.durationMs, { ...context, processId: handle.pid });
     });
 
     const job: BackgroundJob = {
@@ -466,7 +567,7 @@ export class TerminalRuntime {
       getLogs: () => handle.getLogs(),
       toSnapshot: () => ({
         id: handle.id,
-        command,
+        command: SecretRedactor.redact(command),
         pid: handle.pid,
         state: handle.state,
         cwd,
@@ -493,15 +594,54 @@ export class TerminalRuntime {
     const fullCmd = args.length > 0 ? `${command} ${args.join(' ')}` : command;
 
     // 1. Policy evaluation
-    const policyDecision = this.policy.evaluate(fullCmd, { cwd, sessionId: session.id });
+    const policyDecision = this.policy.evaluate(fullCmd, {
+      cwd,
+      sessionId: session.id,
+      requireApproval: options.requireApproval,
+      allowElevated: options.allowElevated
+    });
     if (policyDecision.action === 'deny') {
       throw new Error(`PTY execution denied by policy: ${policyDecision.reason ?? fullCmd}`);
     }
 
     // 2. Permission evaluation
-    const permDecision = this.permissionRules.evaluate(fullCmd, { cwd, sessionId: session.id });
+    const permDecision = this.permissionRules.evaluate(fullCmd, {
+      cwd,
+      sessionId: session.id
+    });
     if (permDecision.action === 'deny') {
       throw new Error(`PTY execution denied by security rules: ${permDecision.reason ?? fullCmd}`);
+    }
+
+
+    // Check approval requirements (Section 5.1 & 7.3)
+    const needsApproval =
+      policyDecision.action === 'require_approval' || permDecision.action === 'require_approval';
+    if (needsApproval) {
+      const reason =
+        policyDecision.action === 'require_approval'
+          ? (policyDecision.reason ?? 'Approval required by policy.')
+          : (permDecision.reason ?? 'Approval required by security rules.');
+
+      const context = { sessionId: session.id, taskId: options.taskId, agentId: options.agentId, cwd };
+      this.events.emitApprovalRequired(SecretRedactor.redact(fullCmd), reason, context);
+
+      const isApproved =
+        options.approvalToken &&
+        this.approvalManager.consumeApproval(options.approvalToken, fullCmd, context);
+
+      if (!isApproved) {
+        this.metrics.recordApproval('required');
+        throw new Error(`PTY execution blocked: Approval required for "${fullCmd}" (${reason})`);
+      }
+      this.metrics.recordApproval('granted');
+    }
+
+    // Check sandbox requirements (Section 5.1 & 8.4)
+    const sandboxRequired = options.sandbox?.required || options.sandbox?.driver === 'bubblewrap';
+    if (sandboxRequired && this.sandboxManager.getDriver().isolationLevel === 'none') {
+      this.metrics.recordSandboxFailure();
+      throw new Error('sandbox unavailable: bubblewrap isolation is required for PTY execution');
     }
 
     // 3. Filtered environment
@@ -691,7 +831,8 @@ export class TerminalRuntime {
           ? (policyDecision.reason ?? 'Approval required by policy.')
           : (permDecision.reason ?? 'Approval required by security rules.');
 
-      this.events.emitApprovalRequired(command, reason, context);
+      this.metrics.recordApproval('required');
+      this.events.emitApprovalRequired(SecretRedactor.redact(command), reason, context);
       const approved = await this.approvalManager.requestApproval(command, reason, {
         cwd,
         sessionId,
@@ -700,6 +841,7 @@ export class TerminalRuntime {
       });
 
       if (!approved) {
+        this.metrics.recordApproval('denied');
         return {
           action: 'approval_required',
           reason,
@@ -708,6 +850,7 @@ export class TerminalRuntime {
           maxOutputBytes: policyDecision.maxOutputBytes
         };
       }
+      this.metrics.recordApproval('granted');
     }
 
     return {
@@ -746,5 +889,25 @@ export class TerminalRuntime {
       }
     }
     return { isExport: false };
+  }
+
+  private checkAliasCommand(command: string): { isAlias: boolean; name?: string; value?: string } {
+    if (command === 'alias') {
+      return { isAlias: true };
+    }
+    if (command.startsWith('alias ') || command.startsWith('alias\t')) {
+      const expr = command.substring(6).trim();
+      if (!/[;&|]/.test(expr)) {
+        const eqIdx = expr.indexOf('=');
+        if (eqIdx !== -1) {
+          const name = expr.substring(0, eqIdx).trim();
+          let value = expr.substring(eqIdx + 1).trim();
+          value = value.replace(/^['"]|['"]$/g, '');
+          return { isAlias: true, name, value };
+        }
+      }
+      return { isAlias: true };
+    }
+    return { isAlias: false };
   }
 }

@@ -195,7 +195,7 @@ export class ProcessHandle {
   public toSnapshot(): ProcessHandleSnapshot {
     return {
       id: this.id,
-      command: this.command,
+      command: SecretRedactor.redact(this.command),
       pid: this.child.pid,
       state: this._state,
       exitCode: this._exitCode,

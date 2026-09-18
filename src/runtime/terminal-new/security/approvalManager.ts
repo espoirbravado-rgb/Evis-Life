@@ -102,14 +102,17 @@ export class ApprovalManager {
       return false;
     }
 
-    // Context bounds check: prevent reusing approval in another session/task/agent
-    if (context?.sessionId && req.sessionId && req.sessionId !== context.sessionId) {
+    // Context bounds check: prevent reusing approval in another session/task/agent or bypassing by omitting context
+    if (req.sessionId && req.sessionId !== context?.sessionId) {
       return false;
     }
-    if (context?.taskId && req.taskId && req.taskId !== context.taskId) {
+    if (req.taskId && req.taskId !== context?.taskId) {
       return false;
     }
-    if (context?.agentId && req.agentId && req.agentId !== context.agentId) {
+    if (req.agentId && req.agentId !== context?.agentId) {
+      return false;
+    }
+    if (req.cwd && context?.cwd && req.cwd !== context.cwd) {
       return false;
     }
 

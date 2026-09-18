@@ -56,6 +56,18 @@ def main():
     sys.stderr.write(f"PID:{pid}\n")
     sys.stderr.flush()
 
+    # Forward termination signals to the child process group, then exit.
+    # Since the child called setsid(), it is its own process group leader (pgid == pid).
+    def _forward_signal(signum, frame):
+        try:
+            os.killpg(pid, signum)  # kill entire child process group
+        except ProcessLookupError:
+            pass
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _forward_signal)
+    signal.signal(signal.SIGINT,  _forward_signal)
+
     # Check if fd 3 is open for control (resize commands)
     has_control_fd = False
     try:

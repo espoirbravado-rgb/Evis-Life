@@ -110,12 +110,16 @@ export class PtyExecutor {
         }
       },
       kill: (signal?: string) => {
-        try {
-          if (innerPid && innerPid !== child.pid) {
-            process.kill(innerPid, signal as NodeJS.Signals ?? 'SIGTERM');
-          }
-        } catch {}
-        child.kill(signal as NodeJS.Signals ?? 'SIGTERM');
+        const sig = (signal as NodeJS.Signals) ?? 'SIGTERM';
+        if (innerPid && innerPid !== child.pid) {
+          // Kill the entire process group of the child shell.
+          // ptyBridge calls setsid() so the shell is the group leader.
+          // Sending to -innerPid terminates the shell and all its descendants.
+          try { process.kill(-innerPid, sig); } catch { /* group may already be gone */ }
+          try { process.kill(innerPid, sig); } catch { /* direct kill as fallback */ }
+        }
+        // Always kill the bridge process itself.
+        child.kill(sig);
       }
     };
 

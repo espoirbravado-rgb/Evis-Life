@@ -226,5 +226,13 @@ describe('Terminal-New Phase 1 (Correctness)', () => {
       assert.equal(result.truncated, true);
       assert.match(result.stdout, /\[output truncated: \d+ bytes omitted\]/);
     });
+
+    it('honors custom shell option during execution', async () => {
+      const runtime = new TerminalRuntime();
+      const result = await runtime.execute('echo $0', { shell: '/bin/sh' });
+      assert.equal(result.status, 'completed');
+      assert.equal(result.exitCode, 0);
+      assert.match(result.stdout, /sh/);
+    });
   });
 });

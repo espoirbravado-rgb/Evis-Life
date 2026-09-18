@@ -49,6 +49,11 @@ export interface CommandExecutionOptions {
   requireApproval?: boolean;
   allowElevated?: boolean;
   signal?: AbortSignal;
+  shell?: string;
+  sandbox?: {
+    required?: boolean;
+    driver?: 'bubblewrap' | 'local';
+  };
 }
 
 export interface CommandOutputChunk {

@@ -131,7 +131,9 @@ export class TerminalEnvironment {
     // 4. Request variables (explicit request overrides)
     if (options.requestEnv) {
       for (const [k, v] of Object.entries(options.requestEnv)) {
-        env[k] = v;
+        if (!this.isKeyBlocked(k)) {
+          env[k] = v;
+        }
       }
     }
 

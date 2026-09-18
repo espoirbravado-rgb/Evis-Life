@@ -12,6 +12,17 @@ export interface PtySpawnOptions {
   env?: Record<string, string>;
   shell?: string;
   sessionId?: SessionId;
+  taskId?: string;
+  agentId?: string;
+  approvalToken?: string;
+  /** When true, policy will return require_approval even for non-restricted commands. */
+  requireApproval?: boolean;
+  /** When true, allows commands that match restricted patterns without requiring approval. */
+  allowElevated?: boolean;
+  sandbox?: {
+    required?: boolean;
+    driver?: 'bubblewrap' | 'local';
+  };
 }
 
 export interface IPtyInstance {

@@ -83,6 +83,26 @@ describe('Terminal-New Phase 2 (Sessions)', () => {
       assert.equal(echoResult.status, 'completed');
       assert.match(echoResult.stdout, /FLAG=active_mode/);
     });
+
+    it('persists and expands aliases in session (alias evis-test=\'echo works\')', async () => {
+      const runtime = new TerminalRuntime();
+      const session = runtime.sessionManager.createSession();
+
+      // 1. Define alias in session
+      const aliasResult = await runtime.execute("alias evis-test='echo works'", {
+        sessionId: session.id
+      });
+      assert.equal(aliasResult.status, 'completed');
+      assert.equal(aliasResult.exitCode, 0);
+
+      // 2. Invoke alias in same session
+      const invokeResult = await runtime.execute('evis-test', {
+        sessionId: session.id
+      });
+      assert.equal(invokeResult.status, 'completed');
+      assert.equal(invokeResult.exitCode, 0);
+      assert.match(invokeResult.stdout, /works/);
+    });
   });
 
   describe('Multi-Session Isolation', () => {
@@ -118,8 +138,11 @@ describe('Terminal-New Phase 2 (Sessions)', () => {
       // Launch long running process in background
       const spawnPromise = runtime.execute('sleep 30', { sessionId: session.id });
 
-      // Allow brief moment for process to spawn
-      await new Promise(r => setTimeout(r, 20));
+      // Allow process to spawn
+      for (let i = 0; i < 50; i++) {
+        if (session.getActiveProcessIds().length > 0) break;
+        await new Promise(r => setTimeout(r, 20));
+      }
 
       const activeProcesses = session.getActiveProcessIds();
       assert.equal(activeProcesses.length, 1);

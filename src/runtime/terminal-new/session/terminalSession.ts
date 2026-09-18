@@ -13,6 +13,7 @@ export class TerminalSession {
   private _cwd: string;
   private _previousCwd?: string;
   private _env: Map<string, string> = new Map();
+  private _aliases: Map<string, string> = new Map();
   private _history: SessionHistoryEntry[] = [];
   private _activeProcessIds: Set<string> = new Set();
   private _status: SessionStatus = 'active';
@@ -89,6 +90,28 @@ export class TerminalSession {
   public removeEnvVar(key: string): void {
     this._env.delete(key);
     this.touch();
+  }
+
+  public setAlias(name: string, command: string): void {
+    this._aliases.set(name, command);
+    this.touch();
+  }
+
+  public getAlias(name: string): string | undefined {
+    return this._aliases.get(name);
+  }
+
+  public removeAlias(name: string): void {
+    this._aliases.delete(name);
+    this.touch();
+  }
+
+  public getAliases(): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const [k, v] of this._aliases.entries()) {
+      result[k] = v;
+    }
+    return result;
   }
 
   public addHistory(entry: SessionHistoryEntry): void {

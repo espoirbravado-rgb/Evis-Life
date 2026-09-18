@@ -131,4 +131,64 @@ describe('Terminal-New Phase 5 (PTY & Pseudo-terminal)', () => {
     const combined = outputChunks.join('');
     assert.ok(!combined.includes('secret_pty_token_123'), 'Secrets must not leak into PTY');
   });
+
+  describe('PTY Security Gates', () => {
+    it('spawnPty() throws when require_approval is active and no approvalToken is provided', async () => {
+      const runtime = new TerminalRuntime();
+
+      // `requireApproval: true` in options triggers the policy `require_approval` action.
+      // Without a valid approvalToken the call must throw before spawning any process.
+      assert.throws(
+        () => runtime.spawnPty('bash', ['-c', 'echo hi'], { requireApproval: true }),
+        /approval required/i,
+        'spawnPty must throw when require_approval is active without a valid token'
+      );
+    });
+
+    it('spawnPty() throws when sandbox.required is true and bubblewrap is unavailable', async () => {
+      const runtime = new TerminalRuntime();
+
+      // The default SandboxManager uses LocalDriver (isolationLevel: 'none').
+      // Requiring bubblewrap isolation must fail closed.
+      assert.throws(
+        () => runtime.spawnPty('bash', ['-c', 'echo hi'], { sandbox: { required: true, driver: 'bubblewrap' } }),
+        /sandbox unavailable/i,
+        'spawnPty must throw when bubblewrap isolation is required but unavailable'
+      );
+    });
+
+    it('spawnPty() succeeds when a valid pre-approved token is supplied for require_approval', async () => {
+      const runtime = new TerminalRuntime();
+
+      // Use the runtime's own ApprovalManager (public field) so the token is valid
+      // inside the same spawnPty() call.
+      // fullCmd is constructed as: command + ' ' + args.join(' ')
+      // spawnPty('printf', ['pty_ok']) → fullCmd = 'printf pty_ok'
+      const req = runtime.approvalManager.createRequest('printf pty_ok', 'Test pre-approval');
+      runtime.approvalManager.approve(req.requestId);
+
+      // spawnPty with requireApproval + valid token should not throw
+      const outputChunks: string[] = [];
+      let didThrow = false;
+      let ptyHandle: any;
+      try {
+        ptyHandle = runtime.spawnPty('printf', ['pty_ok'], {
+          requireApproval: true,
+          approvalToken: req.requestId
+        });
+      } catch {
+        didThrow = true;
+      }
+
+      assert.equal(didThrow, false, 'spawnPty must not throw when a valid approvalToken is provided');
+
+      if (ptyHandle) {
+        ptyHandle.onData((d: string) => outputChunks.push(d));
+        await new Promise<number>((resolve) => ptyHandle.onExit((code: number) => resolve(code)));
+        const combined = outputChunks.join('');
+        assert.match(combined, /pty_ok/, 'PTY output must include expected text');
+      }
+    });
+
+  });
 });
