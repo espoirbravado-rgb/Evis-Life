@@ -1,3 +1,5 @@
+import type { CommandExecutionOptions, PolicyDecision } from './terminalTypes.ts';
+
 export interface TerminalPolicyConfig {
   defaultTimeoutMs: number;
   maxTimeoutMs: number;
@@ -19,14 +21,16 @@ export const DEFAULT_TERMINAL_POLICY: TerminalPolicyConfig = {
     ':(){ :|:& };:',
     'mkfs',
     'dd if=/dev/zero',
+    'dd if=/dev/urandom',
     'shutdown',
     'reboot',
-    'init 0'
+    'init 0',
+    '> /dev/sda'
   ],
   restrictedPatterns: [
     /(^|\s)sudo(\s|$)/,
     /(^|\s)su(\s|$)/,
-    /(^|\s)chmod\s+-R\s+777/,
+    /(^|\s)chmod\s+(-R\s+)?777/,
     /(^|\s)chown\s+-R/
   ],
   maxConcurrentProcesses: 10
@@ -35,18 +39,57 @@ export const DEFAULT_TERMINAL_POLICY: TerminalPolicyConfig = {
 export class TerminalPolicy {
   constructor(private readonly config: TerminalPolicyConfig = DEFAULT_TERMINAL_POLICY) {}
 
-  public isCommandBlocked(command: string): boolean {
+  public evaluate(command: string, options: CommandExecutionOptions = {}): PolicyDecision {
     const trimmed = command.trim();
+
+    // 1. Check blocked commands
     for (const blocked of this.config.blockedCommands) {
       if (trimmed === blocked || trimmed.startsWith(`${blocked} `)) {
-        return true;
+        return {
+          action: 'deny',
+          reason: `Command blocked by policy: "${blocked}" is explicitly forbidden.`
+        };
       }
     }
-    return false;
-  }
 
-  public isRestricted(command: string): boolean {
-    return this.config.restrictedPatterns.some(pattern => pattern.test(command));
+    // 2. Check background execution policy
+    if (options.background && !this.config.allowBackground) {
+      return {
+        action: 'deny',
+        reason: 'Background execution is disabled by policy.'
+      };
+    }
+
+    // 3. Check elevation & restricted patterns
+    const isRestricted = this.config.restrictedPatterns.some(pattern => pattern.test(trimmed));
+    if (isRestricted) {
+      if (options.allowElevated) {
+        return {
+          action: 'allow',
+          effectiveTimeoutMs: this.getEffectiveTimeout(options.timeoutMs),
+          maxOutputBytes: this.getEffectiveMaxOutput(options.maxOutputBytes)
+        };
+      }
+      return {
+        action: 'require_approval',
+        reason: 'Command requires elevated privileges or affects critical system permissions.'
+      };
+    }
+
+    // 4. Check explicit requireApproval flag
+    if (options.requireApproval) {
+      return {
+        action: 'require_approval',
+        reason: 'Execution explicitly requires human approval.'
+      };
+    }
+
+    // 5. Default allow
+    return {
+      action: 'allow',
+      effectiveTimeoutMs: this.getEffectiveTimeout(options.timeoutMs),
+      maxOutputBytes: this.getEffectiveMaxOutput(options.maxOutputBytes)
+    };
   }
 
   public getEffectiveTimeout(requestedTimeout?: number): number {
@@ -56,8 +99,11 @@ export class TerminalPolicy {
     return Math.min(requestedTimeout, this.config.maxTimeoutMs);
   }
 
-  public getMaxOutputBytes(): number {
-    return this.config.maxOutputBytes;
+  public getEffectiveMaxOutput(requestedMaxBytes?: number): number {
+    if (!requestedMaxBytes || requestedMaxBytes <= 0) {
+      return this.config.maxOutputBytes;
+    }
+    return Math.min(requestedMaxBytes, this.config.maxOutputBytes);
   }
 
   public getMaxConcurrentProcesses(): number {

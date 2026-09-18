@@ -1,30 +1,69 @@
+export type PromptCategory =
+  | 'destructive_confirmation'
+  | 'security_elevation'
+  | 'safe_confirmation'
+  | 'selection';
+
 export interface PromptRule {
   name: string;
+  category: PromptCategory;
   pattern: RegExp;
-  defaultResponse: string;
-  isPassword?: boolean;
+  isDangerous: boolean;
+  requiresApproval: boolean;
+  safeResponse?: string;
 }
 
 export const DEFAULT_PROMPT_RULES: PromptRule[] = [
   {
-    name: 'yes-no-default-yes',
-    pattern: /\[Y\/n\]|\(y\/n\)\s*\?/i,
-    defaultResponse: 'y\n'
-  },
-  {
-    name: 'yes-no-default-no',
-    pattern: /\[y\/N\]/i,
-    defaultResponse: 'n\n'
-  },
-  {
-    name: 'confirmation-continue',
-    pattern: /Do you want to continue\?|Are you sure\?/i,
-    defaultResponse: 'yes\n'
-  },
-  {
     name: 'password-prompt',
+    category: 'security_elevation',
     pattern: /(password|passphrase)\s*for\s+.*:/i,
-    defaultResponse: '',
-    isPassword: true
+    isDangerous: true,
+    requiresApproval: true
+  },
+  {
+    name: 'destructive-confirmation',
+    category: 'destructive_confirmation',
+    pattern: /(are you sure you want to delete|permanently delete|remove all|erase)\b/i,
+    isDangerous: true,
+    requiresApproval: true
+  },
+  {
+    name: 'git-destructive-prompt',
+    category: 'destructive_confirmation',
+    pattern: /(force push|discard local changes|hard reset)\b/i,
+    isDangerous: true,
+    requiresApproval: true
+  },
+  {
+    name: 'ssh-host-key-verification',
+    category: 'security_elevation',
+    pattern: /are you sure you want to continue connecting \(yes\/no(\/\[fingerprint\])?\)\?/i,
+    isDangerous: true,
+    requiresApproval: true
+  },
+  {
+    name: 'generic-safe-confirmation-yes-no',
+    category: 'safe_confirmation',
+    pattern: /\[Y\/n\]/i,
+    isDangerous: false,
+    requiresApproval: false,
+    safeResponse: 'y\n'
+  },
+  {
+    name: 'generic-safe-confirmation-no-yes',
+    category: 'safe_confirmation',
+    pattern: /\[y\/N\]/i,
+    isDangerous: false,
+    requiresApproval: false,
+    safeResponse: 'n\n'
+  },
+  {
+    name: 'continue-non-destructive',
+    category: 'safe_confirmation',
+    pattern: /Do you want to continue\?\s*\[Y\/n\]/i,
+    isDangerous: false,
+    requiresApproval: false,
+    safeResponse: 'y\n'
   }
 ];

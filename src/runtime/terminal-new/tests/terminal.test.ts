@@ -23,12 +23,12 @@ describe('TerminalRuntime (terminal-new)', () => {
     assert.equal(result.stdout.trim(), 'hello world');
   });
 
-  it('should block dangerous commands according to policy', async () => {
+  it('should block dangerous commands according to policy with honest denied status', async () => {
     const runtime = new TerminalRuntime();
     const result = await runtime.execute('rm -rf /');
-    assert.notEqual(result.exitCode, 0);
-    assert.equal(result.status, 'failed');
-    assert.match(result.stderr, /blocked by policy/i);
+    assert.equal(result.status, 'denied');
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /blocked by policy|forbidden/i);
   });
 
   it('should redact sensitive secrets in output', async () => {

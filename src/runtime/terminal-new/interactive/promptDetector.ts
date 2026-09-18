@@ -1,8 +1,12 @@
-import { DEFAULT_PROMPT_RULES, type PromptRule } from './interactiveRules.ts';
+import { DEFAULT_PROMPT_RULES, type PromptCategory, type PromptRule } from './interactiveRules.ts';
 
 export interface DetectedPrompt {
-  rule: PromptRule;
+  ruleName: string;
+  category: PromptCategory;
   matchedText: string;
+  isDangerous: boolean;
+  requiresApproval: boolean;
+  confidence: number;
 }
 
 export class PromptDetector {
@@ -17,8 +21,12 @@ export class PromptDetector {
       const match = rule.pattern.exec(text);
       if (match) {
         return {
-          rule,
-          matchedText: match[0]
+          ruleName: rule.name,
+          category: rule.category,
+          matchedText: match[0],
+          isDangerous: rule.isDangerous,
+          requiresApproval: rule.requiresApproval,
+          confidence: 0.95
         };
       }
     }
